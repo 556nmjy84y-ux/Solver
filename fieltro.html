@@ -484,6 +484,30 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
 .pfila .b u.pos{background:var(--chip-green)} .pfila .b u.neg{background:var(--chip-red)}
 .pfila span.v{width:44px; text-align:right; flex:none}
 
+/* ---------- frontera de indiferencia ---------- */
+.umbral{margin-top:11px; padding-top:10px; border-top:1px solid rgba(92,74,50,.22)}
+.umbral .t{font-family:var(--sans); font-size:12.5px; font-weight:600; color:var(--ink);
+  margin-bottom:7px}
+.umbral .t b{font-weight:700}
+.ubarra{position:relative; height:20px; border-radius:4px; margin:9px 0 5px;
+  box-shadow:inset 0 1px 2px rgba(0,0,0,.16)}
+.ubarra .zona{position:absolute; top:0; height:100%; }
+.ubarra .zona:first-child{border-radius:4px 0 0 4px}
+.ubarra .zona:last-child{border-radius:0 4px 4px 0}
+.ubarra .yo{position:absolute; top:-4px; height:28px; width:3px; background:var(--ink);
+  border-radius:2px; box-shadow:0 0 0 1.5px rgba(255,255,255,.75)}
+.ueje{display:flex; justify-content:space-between; font-family:var(--mono);
+  font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-soft)}
+.uleyenda{display:flex; flex-wrap:wrap; gap:9px; font-family:var(--mono); font-size:10.5px;
+  color:var(--ink-soft); margin-top:7px}
+.uleyenda span{display:flex; align-items:center; gap:5px}
+.uleyenda i{width:10px; height:10px; border-radius:2px; display:block;
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.15)}
+.umano{font-family:var(--mono); font-size:11px; color:var(--ink); margin:7px 0 0}
+.umano b{font-weight:700}
+.unota{font-family:var(--mono); font-size:10.5px; color:var(--ink-soft); margin:6px 0 0;
+  line-height:1.5}
+
 /* ---------- panel preflop ---------- */
 .pfgrid{display:grid; grid-template-columns:repeat(13,1fr); gap:1.5px; margin:10px -11px}
 .pfcell{position:relative; aspect-ratio:1; border-radius:2px; background:rgba(92,74,50,.07);
@@ -2027,6 +2051,112 @@ class Solver {
     return { node: n, evs, best, mix, freq, denom };
   }
 
+  // ---------------- frontera de indiferencia ----------------
+  //
+  // Entre dos acciones, ¿existe un punto del ranking de mi propio rango donde
+  // deja de convenir una y empieza a convenir la otra? Cuando existe es LA
+  // regla que se lleva uno a la mesa: "pago con el 38% de arriba". El EV en
+  // fichas de un combo concreto no se transfiere a ninguna otra mano.
+  //
+  // Existe menos veces de lo que parece, y por eso esto mide antes de afirmar:
+  //   - en muchos nodos casi todo el rango es indiferente entre las dos;
+  //   - una apuesta suele ser polarizada, con dos fronteras y no una;
+  //   - y a veces manda el bloqueo, no la fuerza, y no hay corte que valga.
+  // Devolver "aquí no hay regla" es una respuesta útil: dice que no la busques.
+  umbral(path, info, aA, aB) {
+    const n = info.node, p = n.player, N = this.N[p], hc = this.hc[p];
+    const board = this.boardAtPath(path);
+    const nb = board.length, mano = new Int32Array(nb + 2);
+    for (let i = 0; i < nb; i++) mano[i] = board[i];
+
+    const lista = [];
+    for (let h = 0; h < N; h++) {
+      const w = info.freq[h];
+      if (w <= 1e-12) continue;
+      mano[nb] = hc[2 * h]; mano[nb + 1] = hc[2 * h + 1];
+      lista.push({ h: h, w: w, fuerza: evaluate7(mano),
+                   d: info.evs[aA * N + h] - info.evs[aB * N + h] });
+    }
+    if (lista.length < 4) return null;
+    lista.sort((x, y) => x.fuerza - y.fuerza);          // el peor primero
+
+    const m = lista.length;
+    let W = 0;
+    for (let i = 0; i < m; i++) W += lista[i].w;
+
+    // percentil de cada combo, con los empates de fuerza repartidos por la
+    // mitad: misma convención que percentil(), para que las dos cifras que ve
+    // el usuario en la misma pantalla signifiquen lo mismo
+    const pct = new Float64Array(N);
+    let acum = 0, i0 = 0;
+    while (i0 < m) {
+      let i1 = i0, grupo = 0;
+      while (i1 < m && lista[i1].fuerza === lista[i0].fuerza) { grupo += lista[i1].w; i1++; }
+      const v = (acum + grupo / 2) / W;
+      for (let i = i0; i < i1; i++) pct[lista[i].h] = v;
+      acum += grupo; i0 = i1;
+    }
+
+    // Una diferencia de EV por debajo del 0.5% del bote no es una preferencia:
+    // es ruido de convergencia. Esos combos no cuentan ni a favor ni en contra
+    // de ninguna frontera, o cualquier corte parecería bueno.
+    const DEC = 0.005 * this.pot;
+    const PA = new Float64Array(m + 1), PB = new Float64Array(m + 1);
+    const corte = new Float64Array(m + 1);
+    for (let i = 0; i < m; i++) {
+      const d = lista[i].d, w = lista[i].w;
+      PA[i + 1] = PA[i] + (d > DEC ? w : 0);
+      PB[i + 1] = PB[i] + (d < -DEC ? w : 0);
+      corte[i + 1] = corte[i] + w;
+    }
+    for (let i = 0; i <= m; i++) corte[i] /= W;
+    const tA = PA[m], tB = PB[m], decisiva = tA + tB;
+    if (decisiva / W < 0.15)
+      return { tipo: "indiferente", pct: pct, decisiva: decisiva / W,
+               pureza: 1, cortes: [], boardCompleto: nb === 5 };
+
+    // Cuatro formas de partir el ranking. Las dos simples son un corte; las
+    // polarizadas son dos, con la acción en los extremos y la otra en medio,
+    // que es la forma que toma casi toda apuesta de river.
+    let mejor = { bien: -1, tipo: null, cortes: [] };
+    const probar = (bien, tipo, cortes) => {
+      if (bien > mejor.bien) mejor = { bien: bien, tipo: tipo, cortes: cortes };
+    };
+    for (let k = 0; k <= m; k++) {
+      probar(PB[k] + tA - PA[k], "simple-arriba", [corte[k]]);
+      probar(PA[k] + tB - PB[k], "simple-abajo", [corte[k]]);
+    }
+    const simple = mejor;
+
+    // polarizada: para cada corte de salida, el de entrada que más suma ya está
+    // resuelto por el prefijo de máximos, así que sigue siendo lineal
+    let polar = { bien: -1, tipo: null, cortes: [] };
+    const probarP = (bien, tipo, cortes) => {
+      if (bien > polar.bien) polar = { bien: bien, tipo: tipo, cortes: cortes };
+    };
+    let mejorA = -Infinity, kA = 0, mejorB = -Infinity, kB = 0;
+    for (let k2 = 0; k2 <= m; k2++) {
+      const cA = PA[k2] - PB[k2], cB = PB[k2] - PA[k2];
+      if (cA > mejorA) { mejorA = cA; kA = k2; }
+      if (cB > mejorB) { mejorB = cB; kB = k2; }
+      probarP(mejorA + PB[k2] - PA[k2] + tA, "polar-A", [corte[kA], corte[k2]]);
+      probarP(mejorB + PA[k2] - PB[k2] + tB, "polar-B", [corte[kB], corte[k2]]);
+    }
+
+    // La explicación simple gana los empates: dos fronteras solo se justifican
+    // si de verdad describen el nodo bastante mejor que una.
+    const PURA = 0.85, VENTAJA = 0.05;
+    let elegida = simple;
+    if (simple.bien / decisiva < PURA && (polar.bien - simple.bien) / decisiva >= VENTAJA)
+      elegida = polar;
+    const pureza = elegida.bien / decisiva;
+    return {
+      tipo: pureza >= PURA ? elegida.tipo : "difuso",
+      cortes: elegida.cortes, pureza: pureza, decisiva: decisiva / W,
+      pct: pct, boardCompleto: nb === 5
+    };
+  }
+
   // Reporte agregado de un nodo de azar: para cada carta de river, la estrategia
   // agregada y el EV del jugador que actúa justo después de que caiga.
   riverReport(path) {
@@ -3188,6 +3318,24 @@ function detail(node, colors, key, el){
                 (100*mt.mez).toFixed(0)+'%</b>. ' : '') +
           'EV en fichas, con el bote inicial incluido. ' +
           'La cifra de la derecha es el EV de equilibrio de ese combo.</p>';
+
+  // La frontera es una propiedad del nodo, no de la clase: se dibuja entre las
+  // dos acciones que mas usa el nodo, y la marca dice donde cae esta clase.
+  if (A >= 2){
+    var fr = [];
+    for (var a2=0;a2<A;a2++){
+      var t = 0;
+      for (var h2=0;h2<N;h2++) t += curEV.freq[h2] * node.avg[a2*N+h2];
+      fr.push([a2, t]);
+    }
+    fr.sort(function(x,y){ return y[1]-x[1]; });
+    var uA = fr[0][0], uB = fr[1][0];
+    html += umbralHTML(solver, path, curEV, {
+      h: e.combos.map(function(cb){ return cb.h; }),
+      aA: uA, aB: uB, colA: colors[uA], colB: colors[uB],
+      nomA: actionLabel(node.actions[uA]), nomB: actionLabel(node.actions[uB]),
+      etiqueta: "<b>"+key+"</b>" });
+  }
   var d = $("detail");
   d.innerHTML = html; d.classList.add("on");
   d.scrollIntoView({behavior:"smooth", block:"nearest"});
@@ -3282,6 +3430,13 @@ function answer(a){
   var mejorA = 0;
   for (var z=1;z<node.actions.length;z++)
     if (curEV.evs[z*N+h] > curEV.evs[mejorA*N+h]) mejorA = z;
+  // la frontera se enseña siempre, tambien al acertar: es cuando consolida
+  var parA = parDeAcciones(node, N, curEV.evs, h, a);
+  if (parA[1] >= 0)
+    html += umbralHTML(solver, path, curEV, {
+      h: h, aA: parA[0], aB: parA[1],
+      colA: d.colors[parA[0]], colB: d.colors[parA[1]],
+      nomA: actionLabel(node.actions[parA[0]]), nomB: actionLabel(node.actions[parA[1]]) });
   html += porqueHTML(solver, path, h, a, mejorA,
                      node.actions.map(function(x){ return actionLabel(x); }));
   html += '<button class="ghost" id="next">Siguiente mano</button>';
@@ -5126,6 +5281,12 @@ function jugar(n, a){
   var mejorB = 0;
   for (var z2=1;z2<n.actions.length;z2++)
     if (info.evs[z2*N+h] > info.evs[mejorB*N+h]) mejorB = z2;
+  var parB = parDeAcciones(n, N, info.evs, h, a);
+  if (parB[1] >= 0)
+    html += umbralHTML(act(), game.path, info, {
+      h: h, aA: parB[0], aB: parB[1],
+      colA: colors[parB[0]], colB: colors[parB[1]],
+      nomA: actionLabel(n.actions[parB[0]]), nomB: actionLabel(n.actions[parB[1]]) });
   html += porqueHTML(act(), game.path, h, a, mejorB,
                      n.actions.map(function(x){ return actionLabel(x); }));
   $("playFb").innerHTML = html;
@@ -5194,6 +5355,135 @@ function marcador(){
       (100*per/act().pot).toFixed(2)+"% del bote)</span>";
 }
 
+
+// Con que dos acciones se dibuja la frontera. Siempre la de mayor EV para esta
+// mano; enfrente, la que se eligio si fue otra —que es la comparacion que le
+// interesa a quien acaba de fallar— y si no, la segunda mejor.
+function parDeAcciones(node, N, evs, h, elegida){
+  var mejor = 0, A = node.actions.length;
+  for (var i=1;i<A;i++) if (evs[i*N+h] > evs[mejor*N+h]) mejor = i;
+  if (elegida != null && elegida !== mejor) return [mejor, elegida];
+  var otra = -1;
+  for (var j=0;j<A;j++){
+    if (j === mejor) continue;
+    if (otra < 0 || evs[j*N+h] > evs[otra*N+h]) otra = j;
+  }
+  return [mejor, otra];
+}
+
+// La regla que se lleva uno a la mesa: donde esta la frontera entre dos
+// acciones dentro del ranking del propio rango, y de que lado cae esta mano.
+// Se pinta como barra porque es una afirmacion espacial: "de aqui para arriba".
+function umbralHTML(sv, path, info, o){
+  var aA = o.aA, aB = o.aB, colA = o.colA, colB = o.colB, nomA = o.nomA, nomB = o.nomB;
+  var u;
+  try { u = sv.umbral(path, info, aA, aB); }
+  catch(e){ return ""; }
+  if (!u) return "";
+
+  var pc = function(x){ return (100*x).toFixed(0)+"%"; };
+  // h puede ser un combo o la lista de combos de una clase de la rejilla
+  var mio = null;
+  if (o.h != null){
+    if (typeof o.h === "number") mio = u.pct[o.h];
+    else if (o.h.length){
+      var acc = 0;
+      for (var i2=0;i2<o.h.length;i2++) acc += u.pct[o.h[i2]];
+      mio = acc / o.h.length;
+    }
+  }
+  var quien = o.etiqueta || "Tu mano";
+  var html = '<div class="umbral">';
+
+  if (u.tipo === "indiferente"){
+    html += '<div class="t">Aquí da casi igual</div>'+
+      '<p class="unota">Solo el <b>'+pc(u.decisiva)+'</b> de tu rango prefiere de verdad una '+
+      'de las dos: para el resto, '+nomA+' y '+nomB+' valen lo mismo dentro del medio punto '+
+      'porcentual del bote. No hay frontera que aprender porque no hay decisión.</p></div>';
+    return html;
+  }
+  if (u.tipo === "difuso"){
+    html += '<div class="t">Aquí no manda la fuerza de la mano</div>'+
+      '<p class="unota">No hay ningún punto del ranking que separe '+nomA+' de '+nomB+
+      ': el mejor corte posible solo acierta en el <b>'+pc(u.pureza)+'</b> del rango. '+
+      'En un nodo así deciden los bloqueadores y las cartas concretas, no si tu mano es '+
+      'más o menos fuerte. Mira el desglose por combo de abajo.</p></div>';
+    return html;
+  }
+
+  // zonas de la barra, de peor (izquierda) a mejor (derecha)
+  var z = [], c = u.cortes;
+  if (u.tipo === "simple-arriba")      z = [[0,c[0],aB],[c[0],1,aA]];
+  else if (u.tipo === "simple-abajo")  z = [[0,c[0],aA],[c[0],1,aB]];
+  else if (u.tipo === "polar-A")       z = [[0,c[0],aA],[c[0],c[1],aB],[c[1],1,aA]];
+  else                                 z = [[0,c[0],aB],[c[0],c[1],aA],[c[1],1,aB]];
+
+  // Cuidado con la redaccion: esto es una comparacion de EV, no una frecuencia.
+  // "Bet con el 46% superior" se lee como "apuesta esas manos", y no es lo que
+  // dice: dice que con esas manos apostar vale mas que pasar. Cuanta parte del
+  // rango sea indiferente decide lo lejos que queda una cosa de la otra, y esa
+  // distancia se enseña abajo en vez de esconderla.
+  var masaA, titulo, donde;
+  if (u.tipo === "simple-arriba"){
+    masaA = 1 - c[0]; donde = "el <b>"+pc(1-c[0])+" superior</b> de tu rango";
+  } else if (u.tipo === "simple-abajo"){
+    masaA = c[0];     donde = "el <b>"+pc(c[0])+" inferior</b> de tu rango";
+  } else if (u.tipo === "polar-A"){
+    masaA = c[0] + (1-c[1]);
+    donde = "el <b>"+pc(1-c[1])+" superior</b> y el <b>"+pc(c[0])+" inferior</b>";
+  } else {
+    masaA = c[1]-c[0]; donde = "la <b>franja media</b> del rango";
+  }
+  // Un corte pegado a un extremo no es una frontera: es que una accion manda en
+  // todo el rango. "El 100% superior" es una frase que no significa nada.
+  if (masaA >= 0.98 || masaA <= 0.02){
+    var manda = masaA >= 0.98 ? nomA : nomB;
+    html += '<div class="t"><b>'+manda+'</b> gana en EV con todo tu rango</div>'+
+      '<p class="unota">No hay frontera que aprender aquí: no existe ninguna mano con la que '+
+      'la otra opción salga a cuenta.</p></div>';
+    return html;
+  }
+  titulo = "<b>"+nomA+"</b> gana en EV a "+nomB+" con "+donde;
+
+  html += '<div class="t">'+titulo+'</div><div class="ubarra">';
+  z.forEach(function(t){
+    html += '<i class="zona" style="left:'+(100*t[0]).toFixed(2)+'%;width:'+
+            (100*(t[1]-t[0])).toFixed(2)+'%;background:'+(t[2]===aA?colA:colB)+'"></i>';
+  });
+  if (mio != null)
+    html += '<i class="yo" style="left:calc('+(100*mio).toFixed(2)+'% - 1.5px)"></i>';
+  html += '</div><div class="ueje"><span>peor mano</span><span>mejor mano</span></div>';
+
+  html += '<div class="uleyenda"><span><i style="background:'+colA+'"></i>'+nomA+'</span>'+
+          '<span><i style="background:'+colB+'"></i>'+nomB+'</span></div>';
+
+  if (mio != null){
+    var dentro = z.some(function(t){ return t[2]===aA && mio>=t[0] && mio<t[1]; });
+    html += '<p class="umano">'+quien+' está en el percentil <b>'+(100*mio).toFixed(0)+
+      '</b> de tu propio rango, o sea del lado de <b>'+(dentro?nomA:nomB)+'</b>.</p>';
+  }
+  // Frecuencia real del equilibrio: es otra cosa que el argmax de EV, y la
+  // diferencia entre las dos es justo lo que confunde a quien estudia solvers.
+  var nodo = info.node, N2 = sv.N[nodo.player], WT = 0, fA = 0;
+  for (var h4=0;h4<N2;h4++){ WT += info.freq[h4]; fA += info.freq[h4]*nodo.avg[aA*N2+h4]; }
+  fA = WT > 1e-12 ? fA/WT : 0;
+
+  var notas = [];
+  if (Math.abs(fA - masaA) >= 0.10)
+    notas.push("Ojo: el equilibrio juega "+nomA+" el <b>"+pc(fA)+"</b> de las veces, no el "+
+      pc(masaA)+". Mandar en EV no es lo mismo que jugarse siempre: donde la ventaja "+
+      "es minúscula, el solver mezcla para no ser predecible.");
+  if (u.decisiva < 0.6)
+    notas.push("Solo el <b>"+pc(u.decisiva)+"</b> del rango prefiere una de las dos de verdad; "+
+      "al resto le da casi igual, y por eso la frontera describe menos de lo que parece.");
+  if (u.pureza < 0.995)
+    notas.push("El corte falla en el "+pc(1-u.pureza)+" del rango: ahí mandan los bloqueadores.");
+  if (!u.boardCompleto)
+    notas.push("En turn el ranking va por fuerza actual, así que los proyectos caen abajo "+
+               "aunque valgan más de lo que aparentan.");
+  if (notas.length) html += '<p class="unota">'+notas.join(" ")+'</p>';
+  return html + '</div>';
+}
 
 // Renderiza la descomposición: qué manos del rival hacen que la respuesta sea esa.
 function porqueHTML(sv, path, h, elegida, mejor, acciones){
