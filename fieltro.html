@@ -381,6 +381,7 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
 .stat .k{font-family:var(--mono); font-size:9.5px; letter-spacing:.14em;
   text-transform:uppercase; color:var(--ink-soft); margin-bottom:2px}
 .stat .v{font-family:var(--serif); font-size:26px; line-height:1; color:var(--ink)}
+.stat .ic{font-family:var(--mono); font-size:10px; color:var(--ink-soft); margin-top:3px}
 .stat .v.up{color:#25694B} .stat .v.down{color:var(--chip-red)}
 .spark{width:100%; height:74px; display:block; margin:0 0 6px}
 .leak{display:flex; align-items:center; gap:8px; margin-bottom:5px;
@@ -493,6 +494,22 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
 .pfila .b u{display:block; height:100%}
 .pfila .b u.pos{background:var(--chip-green)} .pfila .b u.neg{background:var(--chip-red)}
 .pfila span.v{width:44px; text-align:right; flex:none}
+
+/* ---------- predecir la frecuencia antes de verla ---------- */
+.pred{padding:2px 0 0}
+.pred .q{font-family:var(--sans); font-size:13.5px; color:var(--ink); margin:0 0 10px}
+.pred .q b{font-weight:700}
+.pred .val{font-family:var(--serif); font-size:30px; color:var(--ink); line-height:1;
+  text-align:center; margin:0 0 4px}
+.pred .rapidos{display:flex; gap:5px; margin:9px 0 2px}
+.pred .rapidos button{flex:1; font-family:var(--mono); font-size:11.5px; padding:7px 0;
+  border-radius:5px; border:1px solid rgba(92,74,50,.25); background:#FBF7EE;
+  color:var(--ink); cursor:pointer}
+.pred .rapidos button:active{background:var(--stock-dim)}
+.calib{display:flex; align-items:baseline; gap:9px; margin:0 0 9px;
+  font-family:var(--mono); font-size:11.5px; color:var(--ink-soft)}
+.calib .g{font-family:var(--serif); font-size:19px; line-height:1}
+.calib .g.bien{color:#25694B} .calib .g.mal{color:var(--chip-red)}
 
 /* ---------- frontera de indiferencia ---------- */
 .umbral{margin-top:11px; padding-top:10px; border-top:1px solid rgba(92,74,50,.22)}
@@ -801,6 +818,17 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
     </div>
   </div>
   <p class="turn" id="relojNota"></p>
+
+  <p class="subh">Predecir antes de ver</p>
+  <div class="reprow">
+    <span class="lbl">Frecuencia</span>
+    <div class="wsel" id="predSel">
+      <button data-p="0" class="on">Off</button>
+      <button data-p="1">A veces</button>
+      <button data-p="2">Siempre</button>
+    </div>
+  </div>
+  <p class="turn" id="predNota"></p>
 
   <p class="subh">Repetición espaciada</p>
   <div class="reprow">
@@ -3415,15 +3443,79 @@ function deal(){
   tally();
 }
 
+// ---------------------------------------------------------------------------
+// Predecir la frecuencia antes de verla
+// ---------------------------------------------------------------------------
+// Elegir una accion y que aparezca la respuesta es reconocimiento pasivo. Pedir
+// primero una cifra obliga a recuperar de memoria y a comprometerse, y ademas
+// deja una medida que la puntuacion normal no puede dar: si crees que el
+// equilibrio apuesta el 100% cuando apuesta el 55%, aciertas la accion y aun
+// asi no has entendido el nodo.
+var PREDKEY = "fieltro:pred:v1";
+var predNivel = 0;
+try { var pv = window.localStorage.getItem(PREDKEY); if (pv !== null) predNivel = parseInt(pv); } catch(e){}
+if (!(predNivel >= 0 && predNivel <= 2)) predNivel = 0;
+
+function predToca(){
+  if (predNivel === 2) return true;
+  if (predNivel === 1) return Math.random() < 0.34;   // una de cada tres
+  return false;
+}
+
+function predNotaTxt(){
+  var base = predNivel === 0
+    ? "Desactivado. Al elegir la acción se ve la respuesta directamente."
+    : (predNivel === 1 ? "En una de cada tres manos" : "En todas las manos") +
+      " se te pide la frecuencia antes de enseñarla.";
+  var reg = logLeer().filter(function(r){ return r.pr != null; });
+  if (reg.length < 5) return base;
+  var e = 0;
+  reg.forEach(function(r){ e += Math.abs(r.pr - r.pf); });
+  e /= reg.length;
+  return base + " Llevas <b>"+reg.length+"</b> predicciones y te desvías <b>"+
+    e.toFixed(0)+" puntos</b> de media.";
+}
+
+function pedirPrediccion(a, msDecision){
+  var d = drill, node = d.node;
+  var nom = actionLabel(node.actions[a]);
+  var html = '<div class="pred"><p class="q">Antes de ver la respuesta: ¿qué frecuencia le '+
+    'da el equilibrio a <b>'+nom+'</b> con esta mano?</p>'+
+    '<div class="val" id="predVal">50%</div>'+
+    '<input type="range" id="predRange" min="0" max="100" step="1" value="50" '+
+    'style="width:100%">'+
+    '<div class="rapidos" id="predRapidos"></div>'+
+    '<button class="go" id="predOk" style="margin-top:9px">Ver la respuesta</button></div>';
+  $("drillFb").innerHTML = html;
+  $("drillActs").innerHTML = "";
+  var rango = $("predRange"), val = $("predVal");
+  rango.oninput = function(){ val.textContent = rango.value+"%"; };
+  var rap = $("predRapidos");
+  [0,25,50,75,100].forEach(function(v){
+    var btn = document.createElement("button");
+    btn.textContent = v+"%";
+    btn.onclick = function(){ rango.value = String(v); val.textContent = v+"%"; };
+    rap.appendChild(btn);
+  });
+  $("predOk").onclick = function(){ answerFinal(a, msDecision, parseFloat(rango.value)); };
+}
+
 function answer(a){
-  var d = drill, node = d.node, N = solver.N[node.player], h = d.hand;
   var msDecision = relojTranscurrido();
   relojParar();
+  if (predToca()) return pedirPrediccion(a, msDecision);
+  answerFinal(a, msDecision, null);
+}
+
+function answerFinal(a, msDecision, prediccion){
+  var d = drill, node = d.node, N = solver.N[node.player], h = d.hand;
   var lost = curEV.best[h] - curEV.evs[a*N+h];
   if (lost < 0) lost = 0;
   d.hands++; d.loss += lost;
   curEVref = curEV;
-  logDecision(node, h, a, lost, null, d.board, null, msDecision);
+  var freqReal = 100*node.avg[a*N+h];
+  logDecision(node, h, a, lost, null, d.board, null, msDecision,
+              prediccion == null ? null : { pr: prediccion, pf: freqReal });
   guardarManoCara(solver, node, h, a, lost, d.board, null, lineaDelCamino(path));
 
   var pct = 100*lost/solver.pot;
@@ -3431,6 +3523,14 @@ function answer(a){
   var word = pct < 0.5 ? "Bien jugado" : (pct < 2 ? "Pérdida pequeña" : "Error");
   var html = '<p class="verdict '+cls+'">'+word+
     '<small>EV perdido: '+lost.toFixed(2)+' fichas · '+pct.toFixed(2)+'% del bote</small></p>';
+
+  if (prediccion != null){
+    var err = Math.abs(prediccion - freqReal);
+    var g = err <= 10 ? ["bien","Calibrado"] : (err <= 25 ? ["","Cerca"] : ["mal","Lejos"]);
+    html += '<div class="calib"><span class="g '+g[0]+'">'+g[1]+'</span>'+
+      '<span>dijiste <b>'+prediccion.toFixed(0)+'%</b>, es <b>'+freqReal.toFixed(0)+
+      '%</b> · te desviaste '+err.toFixed(0)+' puntos</span></div>';
+  }
 
   node.actions.forEach(function(act,i){
     var f = 100*node.avg[i*N+h], ev = curEV.evs[i*N+h];
@@ -4066,7 +4166,7 @@ function logGuardar(){
 
 // Registra una decision. 'cat' se calcula con el board efectivo del nodo,
 // que en turn incluye las cartas de river ya repartidas.
-function logDecision(node, h, a, perdida, runout, board0, sv, ms){
+function logDecision(node, h, a, perdida, runout, board0, sv, ms, extra){
   var S = sv || solver;
   var reg = logLeer();
   planLeer();          // siembra desde el historial antes de añadir esta
@@ -4147,7 +4247,9 @@ function logDecision(node, h, a, perdida, runout, board0, sv, ms){
     g0: Math.round(1000*ganPasiva)/1000,
     gm: Math.round(1000*ganModal)/1000,
     jue: Math.round(1000*enJuego)/1000,
-    pot: S.pot
+    pot: S.pot,
+    pr: extra ? Math.round(extra.pr) : null,      // lo que predijiste
+    pf: extra ? Math.round(extra.pf) : null       // lo que era
   });
   if (reg.length > 3000) reg.splice(0, reg.length-3000);
   logGuardar();
@@ -4187,6 +4289,22 @@ function puntuacion(rs){
   var t = 0;
   v.forEach(function(r){ t += puntoDe(r.loss/r.pot); });
   return 100*t/v.length;
+}
+// La puntuacion es la media de una variable en {-1,0,1}, asi que su margen de
+// error sale del error estandar de esa media. Sin esta cifra, 42 y 58 parecen
+// niveles distintos cuando con 80 decisiones el margen es de +-20 puntos, y el
+// indicador de "Cambio" invita a leer ruido como progreso.
+function puntuacionIC(rs){
+  var v = rs.filter(cuenta);
+  var n = v.length;
+  if (!n) return null;
+  var t = 0, t2 = 0;
+  v.forEach(function(r){ var x = puntoDe(r.loss/r.pot); t += x; t2 += x*x; });
+  var media = t/n;
+  if (n < 2) return { p: 100*media, ic: null, es: null, n: n };
+  var varianza = Math.max(0, (t2 - n*media*media) / (n-1));
+  var es = Math.sqrt(varianza/n);
+  return { p: 100*media, ic: 100*1.96*es, es: 100*es, n: n };
 }
 // Puntuación que habrían sacado las políticas de referencia en estas mismas
 // decisiones. gan = pmax − pérdida, así que la pérdida de cada una se despeja.
@@ -4231,8 +4349,10 @@ function renderNivel(reg){
     var s = puntoDe(r.loss/r.pot);
     if (s > 0) reparto.ok++; else if (s < 0) reparto.mal++; else reparto.ne++;
   });
+  var icN = puntuacionIC(conGan);
   $("nivBadge").innerHTML = '<span class="b">'+nv[0]+'</span>'+
-    '<span class="p">puntuación '+cap.toFixed(0)+' · '+reparto.ok+' aciertos, '+
+    '<span class="p">puntuación '+cap.toFixed(0)+
+    (icN && icN.ic != null ? " ± "+icN.ic.toFixed(0) : "")+' · '+reparto.ok+' aciertos, '+
     reparto.ne+' neutras, '+reparto.mal+' errores · '+
     (conGan.length-reparto.ok-reparto.ne-reparto.mal)+' decisiones sin nada en juego</span>';
 
@@ -4425,21 +4545,31 @@ function renderProg(){
 
   // La puntuación es el titular: no puede inflarse porque una acción mediocre
   // suma exactamente cero, ni sube ni baja.
-  var punt = puntuacion(conGan);
-  var puntAntes = puntuacion(conGan.slice(0, mitad));
-  var puntAhora = puntuacion(conGan.slice(mitad));
-  var mej = (mitad >= 10 && puntAntes !== null) ? puntAhora - puntAntes : null;
-  var cls = mej == null ? "" : (mej > 2 ? "up" : (mej < -2 ? "down" : ""));
+  var ic = puntuacionIC(conGan);
+  var punt = ic ? ic.p : null;
+  var icA = puntuacionIC(conGan.slice(0, mitad));
+  var icB = puntuacionIC(conGan.slice(mitad));
+  var mej = (mitad >= 10 && icA && icB) ? icB.p - icA.p : null;
+  // margen de la diferencia entre dos medias independientes
+  var icMej = (icA && icB && icA.es != null && icB.es != null)
+    ? 1.96*Math.sqrt(icA.es*icA.es + icB.es*icB.es) : null;
+  var signif = (mej != null && icMej != null) ? Math.abs(mej) > icMej : null;
+  var cls = (mej == null || signif === false) ? "" : (mej > 0 ? "up" : "down");
   var num = function(v){ return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(0); };
   $("progStat").innerHTML =
     '<div><div class="k">Decisiones</div><div class="v">'+n+'</div></div>'+
     (punt === null ? ""
       : '<div><div class="k">Puntuación</div><div class="v '+(punt>=0?"up":"down")+'">'+
-        num(punt)+'</div></div>')+
+        num(punt)+'</div>'+
+        (ic.ic == null ? "" : '<div class="ic">± '+ic.ic.toFixed(0)+' · n='+ic.n+'</div>')+
+        '</div>')+
     '<div><div class="k">EV perdido</div><div class="v">'+mediaPerd(reg).toFixed(2)+
       '<span style="font-size:13px">%</span></div></div>'+
     (mej == null ? ""
-      : '<div><div class="k">Cambio</div><div class="v '+cls+'">'+num(mej)+'</div></div>');
+      : '<div><div class="k">Cambio</div><div class="v '+cls+'">'+num(mej)+'</div>'+
+        (icMej == null ? "" :
+          '<div class="ic">'+(signif ? "real, ± "+icMej.toFixed(0) : "dentro del ruido")+'</div>')+
+        '</div>');
 
   // ---- gráfica de barras con signo: arriba capturas, abajo regalas ----
   var serie = conGan.length ? conGan : reg;
@@ -4514,12 +4644,16 @@ function renderProg(){
 
   $("repNote").innerHTML = repResumen().txt;
   $("repEstado").innerHTML = repEstadoHTML();
+  $("predNota").innerHTML = predNotaTxt();
   $("relojNota").innerHTML = limiteReloj
     ? "Tienes <b>"+limiteReloj+" s</b> por decisión. Pasado el tiempo el contador sigue en rojo: nadie decide por ti, solo queda marcada como tardía."
     : "Sin límite. El tiempo se sigue midiendo para poder comparar tus decisiones rápidas con las pausadas.";
   renderNivel(reg);
   renderCaras();
-  $("progWarn").innerHTML = "<b>Puntuación</b> va de −100 a +100. Una decisión que pierde "+
+  $("progWarn").innerHTML = "<b>El margen ± es real, no decorativo:</b> con pocas decisiones la "+
+    "puntuación baila sola. Si el <b>Cambio</b> entre tu primera y tu segunda mitad no supera su "+
+    "propio margen, no es progreso: es el reparto. "+
+    "<b>Puntuación</b> va de −100 a +100. Una decisión que pierde "+
     "menos del 0.5% del bote cuenta como acierto y suma 1; si pierde más del 2% es un error y "+
     "resta 1; entre medias no suma ni resta. El umbral va por pérdida y no por acertar la acción "+
     "de mayor EV porque en el 60% de los casos hay varias empatadas y el equilibrio es indiferente "+
@@ -4815,6 +4949,17 @@ function repPintar(id, sufijo){
   el.innerHTML = r.txt;
   if (r.off) el.classList.add("off"); else el.classList.remove("off");
 }
+
+Array.prototype.forEach.call($("predSel").children, function(btn){
+  if (parseInt(btn.dataset.p) === predNivel) btn.classList.add("on"); else btn.classList.remove("on");
+  btn.onclick = function(){
+    predNivel = parseInt(btn.dataset.p);
+    try { window.localStorage.setItem(PREDKEY, String(predNivel)); } catch(e){}
+    Array.prototype.forEach.call($("predSel").children, function(o){ o.classList.remove("on"); });
+    btn.classList.add("on");
+    $("predNota").innerHTML = predNotaTxt();
+  };
+});
 
 Array.prototype.forEach.call($("repSel").children, function(btn){
   if (parseInt(btn.dataset.l) === repNivel) btn.classList.add("on"); else btn.classList.remove("on");
