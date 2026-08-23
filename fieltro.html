@@ -208,6 +208,27 @@ button.go[disabled]{opacity:.55}
 .note b{color:#BCCCC0; font-weight:600}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
 
+/* ---------- pagina sin arrancar / errores en pantalla ---------- */
+/* Visible por defecto en el HTML: el script lo quita nada mas terminar de
+   inicializar. Si se queda a la vista es que el JavaScript no llego a correr,
+   que es indistinguible de "la app esta rota" cuando no hay consola a mano. */
+#arranque, #fallo{
+  background:var(--stock); color:var(--ink); border-radius:10px;
+  padding:14px 15px; margin:0 0 14px; font-size:13.5px; line-height:1.55;
+  border-left:4px solid var(--chip-red);
+  box-shadow:0 2px 0 rgba(0,0,0,.3), 0 10px 24px rgba(0,0,0,.28);
+}
+#arranque b, #fallo b{font-weight:700}
+#arranque ul{margin:7px 0 0; padding-left:19px}
+#arranque li{margin-bottom:3px}
+#fallo{display:none; border-left-color:#8E2B22}
+#fallo.on{display:block}
+#fallo pre{
+  font-family:var(--mono); font-size:11px; white-space:pre-wrap; word-break:break-word;
+  background:rgba(92,74,50,.08); padding:8px 9px; border-radius:5px; margin:7px 0 0;
+  max-height:170px; overflow:auto;
+}
+
 /* ---------- capa practica: EV y entrenador ---------- */
 .hand{margin:12px 0 16px}
 .hand .card{width:48px; height:66px}
@@ -484,6 +505,18 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
 </style>
 </head>
 <body>
+<div id="arranque">
+  <b>Esta página no ha arrancado.</b> Todo lo que ves es el armazón: el board, la rejilla
+  y los botones los construye el JavaScript, que aquí no se ha ejecutado. Suele pasar al
+  abrir el archivo desde:
+  <ul>
+    <li>la app <b>Archivos</b> de iOS, o la vista previa de Gmail, Drive o WhatsApp;</li>
+    <li>un navegador con el JavaScript desactivado.</li>
+  </ul>
+  Ábrelo directamente en Safari o Chrome —«Compartir → Abrir en Safari»— y este aviso
+  desaparecerá solo.
+</div>
+<div id="fallo"></div>
 <p class="eyebrow">Equilibrio de Nash · river</p>
 <h1>Fieltro <em>solver</em></h1>
 <p class="tagline">Estrategia GTO para spots de river, calculada en tu teléfono.</p>
@@ -804,6 +837,30 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
     <button class="close" id="sheetClose">Cerrar</button>
   </div>
 </div>
+
+<script>
+// Un fallo de JavaScript en un telefono no se ve en ningun sitio: la pagina
+// simplemente deja de responder. Esto lo saca a la pantalla para que se pueda
+// leer y contar, en vez de tener que adivinarlo.
+(function(){
+  var pintar = function(txt){
+    var el = document.getElementById("fallo");
+    if (!el) return;
+    el.innerHTML = "<b>Algo ha fallado dentro de la página.</b> A partir de aquí puede que " +
+      "los botones no respondan. Copia este texto si necesitas reportarlo:" +
+      "<pre></pre>";
+    el.querySelector("pre").textContent = String(txt);
+    el.className = "on";
+  };
+  window.addEventListener("error", function(ev){
+    pintar((ev.error && ev.error.stack) || ev.message ||
+           ("error en " + (ev.filename || "?") + ":" + ev.lineno));
+  });
+  window.addEventListener("unhandledrejection", function(ev){
+    pintar("Promesa rechazada: " + ((ev.reason && ev.reason.stack) || ev.reason));
+  });
+})();
+</script>
 
 <script id="motor">
 // ===================================================================
@@ -5263,6 +5320,11 @@ aplicarEstado(leerJSON(ULTKEY, null));
 pintarSpots();
 drawBoard();
 renderProg();
+
+// Ultima linea a proposito: si algo revento antes, el aviso se queda puesto y
+// dice lo que pasa en vez de dejar la pagina muda.
+var _arranque = document.getElementById("arranque");
+if (_arranque && _arranque.parentNode) _arranque.parentNode.removeChild(_arranque);
 })();
 </script>
 </body>
