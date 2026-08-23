@@ -154,12 +154,16 @@ button.go[disabled]{opacity:.55}
 .turn b{color:var(--ink)}
 
 /* ---------- matriz 13x13 ---------- */
-.grid{display:grid; grid-template-columns:repeat(13,1fr); gap:1.5px; margin:12px 0 10px}
+/* 13 columnas en un telefono dejan la celda en 24 px, por debajo del minimo
+   comodo de toque. Sacar la rejilla hasta los bordes del panel recupera los
+   30 px del padding lateral, que es todo lo que fisicamente se puede ganar
+   sin scroll horizontal; el resto lo cubre el zoom del navegador. */
+.grid{display:grid; grid-template-columns:repeat(13,1fr); gap:1.5px; margin:12px -11px 10px}
 .cell{
   position:relative; aspect-ratio:1; border-radius:2px; overflow:hidden;
   background:rgba(92,74,50,.07); cursor:pointer;
 }
-.cell.void{background:rgba(92,74,50,.05); cursor:default}
+.cell.void{background:rgba(92,74,50,.05)}
 .cell u{
   position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
   font-family:var(--mono); font-size:7.5px; font-weight:700; text-decoration:none;
@@ -460,8 +464,10 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
 .pfila span.v{width:44px; text-align:right; flex:none}
 
 /* ---------- panel preflop ---------- */
-.pfgrid{display:grid; grid-template-columns:repeat(13,1fr); gap:1.5px; margin:10px 0}
-.pfcell{position:relative; aspect-ratio:1; border-radius:2px; background:rgba(92,74,50,.07)}
+.pfgrid{display:grid; grid-template-columns:repeat(13,1fr); gap:1.5px; margin:10px -11px}
+.pfcell{position:relative; aspect-ratio:1; border-radius:2px; background:rgba(92,74,50,.07);
+  cursor:pointer}
+.pfcell.pick{outline:2px solid var(--ink); outline-offset:-2px; z-index:2}
 .pfcell u{position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
   font-family:var(--mono); font-size:7.5px; font-weight:700; text-decoration:none;
   color:var(--ink); letter-spacing:-.03em}
@@ -534,6 +540,7 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
     </div>
     <div class="pfgrid" id="pfGrid"></div>
     <p class="turn" id="pfNota"></p>
+    <p class="turn" id="pfDetalle"></p>
     <button class="ghost" id="pfTrain">Entrenar este spot</button>
   </div>
 
@@ -1506,17 +1513,25 @@ class Solver {
   _ranges(oopTxt, ipTxt) {
     const bset = new Set(this.board);
     this.hc = []; this.reach = []; this.N = []; this.index = [];
+    // Clases que el texto del rango pedia, antes de descontar las cartas del
+    // board. Sirve para distinguir "esta mano no esta en tu rango" de "esta,
+    // pero el board se lleva todos sus combos", que es una respuesta muy
+    // distinta cuando alguien toca una casilla apagada de la rejilla.
+    this.clasesRango = [];
     for (const txt of [oopTxt, ipTxt]) {
       const w = parseRange(txt);
       const keys = [...w.keys()].sort((a, b) => a - b);
       const hc = [], rw = [], ix = new Map();
+      const pedidas = new Set();
       for (const k of keys) {
         const a = Math.floor(k / 52), b = k % 52;
+        if (w.get(k) > 0) pedidas.add(handClass(a, b));
         if (w.get(k) <= 0 || bset.has(a) || bset.has(b)) continue;
         ix.set(k, rw.length);
         hc.push(a, b); rw.push(w.get(k));
       }
       if (!rw.length) throw new Error("Un rango quedó vacío después de quitar las cartas del board");
+      this.clasesRango.push(pedidas);
       this.hc.push(Int32Array.from(hc));
       this.reach.push(Float64Array.from(rw));
       this.N.push(rw.length);
@@ -2996,7 +3011,14 @@ function renderGrid(node, colors){
                       : RANKS[hi]+RANKS[lo]+(r>c ? "s" : "o");
       var cell = document.createElement("div");
       var e = tab.get(key);
-      if (!e){ cell.className = "cell void"; cell.innerHTML = "<u>"+key+"</u>"; }
+      if (!e){
+        cell.className = "cell void";
+        cell.innerHTML = "<u>"+key+"</u>";
+        // 153 de las 169 casillas estan apagadas con un rango normal. Antes no
+        // respondian a nada, asi que tocarlas parecia la pagina rota en vez de
+        // "esa mano no esta en el rango".
+        (function(k, el){ cell.onclick = function(){ detalleVacio(node, k, el); }; })(key, cell);
+      }
       else {
         cell.className = "cell";
         if (met){
@@ -3039,10 +3061,49 @@ function renderGrid(node, colors){
   }
 }
 
-function detail(node, colors, key, el){
-  var e = tablaDe(node).get(key);
+function marcarCelda(el){
   document.querySelectorAll(".cell.pick").forEach(function(x){ x.classList.remove("pick"); });
   if (el) el.classList.add("pick");
+}
+
+// Por que esta clase no tiene combos en este nodo. Son tres motivos distintos y
+// cada uno pide una accion distinta del usuario, asi que se distinguen.
+function detalleVacio(node, key, el){
+  marcarCelda(el);
+  var p = node.player, quien = p===0 ? "OOP" : "IP", campo = p===0 ? "oop" : "ip";
+  var pedida = solver.clasesRango[p].has(key);
+  var enElOtro = solver.clasesRango[1-p].has(key);
+  var razon = pedida
+    ? "Está en el rango de <b>"+quien+"</b>, pero las cartas del board ocupan todos sus combos, "+
+      "así que en este tablero no existe."
+    : "No está en el rango de <b>"+quien+"</b>, que es quien actúa en este nodo.";
+  var extra = (!pedida && enElOtro)
+    ? " Sí está en el rango de <b>"+(p===0?"IP":"OOP")+"</b>, pero la rejilla siempre muestra el rango de quien decide."
+    : "";
+  var vivas = tablaDe(node).size;
+  var html = "<h3>"+key+"</h3>"+
+    '<p class="turn" style="margin:0 0 8px">'+razon+extra+'</p>'+
+    '<p class="turn" style="margin:0 0 10px">De las 169 clases, <b>'+vivas+
+    '</b> tienen combos aquí; el resto aparece apagado.</p>';
+  if (!pedida) html += '<button class="ghost" id="irAlRango" style="margin-top:0">'+
+    'Añadir '+key+' al rango de '+quien+'</button>';
+  var d = $("detail");
+  d.innerHTML = html; d.classList.add("on");
+  var b = $("irAlRango");
+  if (b) b.onclick = function(){
+    var ta = $(campo);
+    ta.value = ta.value.trim().replace(/,\s*$/, "") + ", " + key;
+    ta.scrollIntoView({behavior:"smooth", block:"center"});
+    ta.focus();
+    d.innerHTML = '<h3>'+key+'</h3><p class="turn">Añadida al rango de '+quien+
+      '. Pulsa <b>Resolver</b> para recalcular con ella dentro.</p>';
+  };
+  d.scrollIntoView({behavior:"smooth", block:"nearest"});
+}
+
+function detail(node, colors, key, el){
+  var e = tablaDe(node).get(key);
+  marcarCelda(el);
   var N = solver.N[node.player], A = node.actions.length;
 
   // EV de cada accion, promediado sobre los combos de la clase segun su frecuencia
@@ -3325,6 +3386,7 @@ function pintarPreflop(){
 function pintarRejillaPF(){
   var g = $("pfGrid");
   g.innerHTML = "";
+  $("pfDetalle").innerHTML = "";
   var w = {};
   if (pfSol.referencia) w = pfSol.pesos;
   else {
@@ -3346,6 +3408,9 @@ function pintarRejillaPF(){
       cell.className = "pfcell" + (v > 0.02 ? "" : " frio");
       if (v > 0.02) cell.style.background = "rgba(46,125,91,"+(0.2 + 0.8*v).toFixed(3)+")";
       cell.innerHTML = "<u>"+key+"</u>";
+      // la rejilla era solo de mirar: ni una de las 169 casillas respondia,
+      // aunque el EV por mano ya estaba calculado y no se enseñaba en ningun sitio
+      (function(k, el){ cell.onclick = function(){ pfDetalle(k, el); }; })(key, cell);
       g.appendChild(cell);
     }
   }
@@ -3356,6 +3421,37 @@ function pintarRejillaPF(){
     : (pfVista === "push"
       ? "Rango de empuje de quien actúa primero. <b>"+n+"</b> clases empujan más de la mitad de las veces."
       : "Rango de call de la ciega grande frente a ese empuje. <b>"+n+"</b> clases pagan.");
+}
+
+// Detalle de una clase del preflop: frecuencia y, en los formatos resueltos,
+// el EV de cada accion frente a retirarse.
+function pfDetalle(key, el){
+  if (!pfSol) return;
+  Array.prototype.forEach.call($("pfGrid").children, function(x){ x.classList.remove("pick"); });
+  if (el) el.classList.add("pick");
+  var u = pfSol.unidad || "bb", html;
+  if (pfSol.referencia){
+    var w = pfSol.pesos[key] || 0;
+    html = "<b>"+key+"</b> · " + (w > 0
+      ? "dentro del rango, peso <b>"+(100*w).toFixed(0)+"%</b>."
+      : "fuera de este rango de referencia.") +
+      " Es un rango convencional, no resuelto: no hay EV que enseñar.";
+  } else {
+    var n = 0, sE = 0, sP = 0, evE = 0, evP = 0;
+    for (var h=0;h<pfSol.clase.length;h++){
+      if (claseNombre(pfSol.clase[h]) !== key) continue;
+      n++; sE += pfSol.empuja[h]; sP += pfSol.paga[h];
+      evE += pfSol.evEmpuja[h]; evP += pfSol.evPaga[h];
+    }
+    if (!n){ $("pfDetalle").innerHTML = ""; return; }
+    sE /= n; sP /= n; evE /= n; evP /= n;
+    html = "<b>"+key+"</b> · empuja el <b>"+(100*sE).toFixed(0)+"%</b>, paga el <b>"+
+      (100*sP).toFixed(0)+"%</b>." +
+      " Empujar vale <b>"+evE.toFixed(3)+"</b> "+u+" frente a "+pfSol.evFoldSB.toFixed(3)+
+      " de retirarse; pagar el all-in vale <b>"+evP.toFixed(3)+"</b> frente a "+
+      pfSol.evFoldBB.toFixed(3)+".";
+  }
+  $("pfDetalle").innerHTML = html;
 }
 
 Array.prototype.forEach.call($("pfVista").children, function(btn){
