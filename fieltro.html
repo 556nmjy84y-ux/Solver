@@ -394,6 +394,16 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
   color:var(--rail); margin:16px 0 8px}
 
 /* ---------- repeticion espaciada ---------- */
+.rfila{display:flex; align-items:center; gap:8px; margin-bottom:4px;
+  font-family:var(--mono); font-size:11px}
+.rfila .n{width:112px; flex:none; color:var(--ink); overflow:hidden;
+  text-overflow:ellipsis; white-space:nowrap}
+.rfila .b{flex:1; height:9px; background:rgba(92,74,50,.12); border-radius:3px; overflow:hidden}
+.rfila .b u{display:block; height:100%; background:var(--chip-green)}
+.rfila .b u.vence{background:#C8A24A}
+.rfila .b u.vencida{background:var(--chip-red)}
+.rfila .c{width:64px; text-align:right; flex:none; color:var(--ink-soft)}
+.rfila .k{width:34px; text-align:right; flex:none; color:rgba(92,74,50,.55)}
 .repline{font-family:var(--mono); font-size:11px; color:var(--ink-soft);
   margin:0 0 10px; padding:7px 9px; background:rgba(46,125,91,.07);
   border-left:3px solid var(--chip-green); border-radius:0 4px 4px 0}
@@ -802,6 +812,7 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
     </div>
   </div>
   <p class="turn" id="repNote"></p>
+  <div id="repEstado"></div>
 
   <p class="subh">Tus manos más caras</p>
   <div id="caras"></div>
@@ -3349,7 +3360,7 @@ $("toDrill").onclick = function(){
   if (t <= 1e-12) return;
   drill = { node:node, colors:actionColors(node), freq:curEV.freq, hands:0, loss:0, hand:-1,
             board: solver.boardAtPath(path) };
-  repPintar("drillRep");
+  repPintar("drillRep", planSufijo(node, solver));
   $("stratPanel").style.display = "none";
   $("drill").style.display = "block";
   $("drillSpot").innerHTML = "Juegas como <b>"+(node.player===0?"OOP":"IP")+
@@ -3370,14 +3381,16 @@ function deal(){
   var d = drill, N = solver.N[d.node.player];
   // los pesos se recalculan en CADA reparto: la repeticion tiene que reaccionar
   // a los errores de esta misma sesion, no a los del momento en que abriste
-  var pesos = repAplicar(d.freq, d.board, d.node.player).pesos;
+  var rep = repAplicar(d.freq, d.board, d.node.player, null, d.node);
+  var pesos = rep.pesos;
   var cum = new Float64Array(N), t = 0;
   for (var i2=0;i2<N;i2++){ t += pesos[i2]; cum[i2] = t; }
   if (t <= 1e-12) return;
   var x = Math.random() * t, lo = 0, hi = N-1;
   while (lo < hi){ var m = (lo+hi)>>1; if (cum[m] < x) lo = m+1; else hi = m; }
   d.hand = lo;
-  repPintar("drillRep");
+  if (rep.cats) planServido(rep.cats[lo]);
+  repPintar("drillRep", rep.sufijo);
 
   var p = d.node.player, el = $("drillHand");
   el.innerHTML = "";
@@ -4056,6 +4069,7 @@ function logGuardar(){
 function logDecision(node, h, a, perdida, runout, board0, sv, ms){
   var S = sv || solver;
   var reg = logLeer();
+  planLeer();          // siembra desde el historial antes de añadir esta
   var p = node.player;
   var c1 = S.hc[p][2*h], c2 = S.hc[p][2*h+1];
   var board = S.board.concat(runout || []);
@@ -4101,6 +4115,9 @@ function logDecision(node, h, a, perdida, runout, board0, sv, ms){
   // el equilibrio en ESE mismo punto, que es lo que revela un sesgo.
   var kind = node.actions[a].kind;
   var enfrenta = node.actions[0].kind === "fold" ? 1 : 0;
+  // posicion y tramo de apuesta: sin esto el repaso solo puede agrupar por
+  // categoria de mano, que es demasiado grueso para lo que se falla de verdad
+  var suf = planSufijo(node, S), trozos = suf.split("|");
   var agrE = 0, folE = 0;
   for (var i3=0;i3<A;i3++){
     var kk = node.actions[i3].kind, pr = node.avg[i3*N+h];
@@ -4117,6 +4134,8 @@ function logDecision(node, h, a, perdida, runout, board0, sv, ms){
     fol: kind === "fold" ? 1 : 0,
     folE: Math.round(1000*folE)/1000,
     enf: enfrenta,
+    pos: trozos[1],
+    tam: trozos[2],
     ms: (ms == null ? null : ms),
     lim: limiteReloj || null,
     cls: handClass(c1, c2),
@@ -4132,6 +4151,11 @@ function logDecision(node, h, a, perdida, runout, board0, sv, ms){
   });
   if (reg.length > 3000) reg.splice(0, reg.length-3000);
   logGuardar();
+
+  // Solo puntua para el repaso lo que tenia algo en juego: acertar donde da
+  // igual no dice nada sobre si te acuerdas.
+  if (S.pot > 0 && enJuego/S.pot >= UMBRAL_JUEGO)
+    planRegistrar(cat0, suf, puntoDe(perdida/S.pot) > 0, Date.now());
 }
 var curEVref = null;   // el actionEVs vigente en el momento de decidir
 
@@ -4489,6 +4513,7 @@ function renderProg(){
   }).join("") : '<p class="turn">Todavía no hay decisiones con pérdida.</p>';
 
   $("repNote").innerHTML = repResumen().txt;
+  $("repEstado").innerHTML = repEstadoHTML();
   $("relojNota").innerHTML = limiteReloj
     ? "Tienes <b>"+limiteReloj+" s</b> por decisión. Pasado el tiempo el contador sigue en rojo: nadie decide por ti, solo queda marcada como tardía."
     : "Sin límite. El tiempo se sigue midiendo para poder comparar tus decisiones rápidas con las pausadas.";
@@ -4505,7 +4530,12 @@ function renderProg(){
 
 $("progWipe").onclick = function(){
   logMem = []; logVersion++;
-  try { window.localStorage.removeItem(LOGKEY); window.localStorage.removeItem(CARASKEY); } catch(e){}
+  planMem = {}; planCola = []; multClave = null;
+  try {
+    window.localStorage.removeItem(LOGKEY);
+    window.localStorage.removeItem(CARASKEY);
+    window.localStorage.removeItem(PLANKEY);
+  } catch(e){}
   $("prog").style.display = "none";
 };
 $("progHide").onclick = function(){ $("prog").style.display = "none"; };
@@ -4525,7 +4555,7 @@ var repNivel = 1;
 try { var g = window.localStorage.getItem(REPKEY); if (g !== null) repNivel = parseInt(g); } catch(e){}
 if (!(repNivel >= 0 && repNivel <= 2)) repNivel = 1;
 
-var K_ENCOGE = 12, MULT_MIN = 0.25, MULT_MAX = 4, VENTANA = 400, TOPE_PERDIDA = 15;
+var MULT_MIN = 0.25, MULT_MAX = 4;   // suelo y techo del sesgo de reparto
 var catCache = {};
 
 var CAT_CACHE_MAX = 400;   // con un pool de 300 tableros esto crecia sin freno
@@ -4544,86 +4574,243 @@ function catsDe(board, player, sv){
   return out;
 }
 
-// Multiplicador por categoría a partir del historial reciente.
-// Tres decisiones que costaron una reescritura:
-//   - La pérdida de cada decisión se recorta al 15% del bote. Un desastre suelto
-//     es ruido, no un patrón; sin este recorte una sola mano saturaba el tope.
-//   - La referencia de cada categoría es la media de las DEMÁS, no la media
-//     global: si no, la propia categoría contamina su propio baremo.
-//   - El contraste va por exponencial de una razón acotada en (-1,1), así que
-//     el número de observaciones decide de verdad cuánto sube, en vez de que
-//     el recorte haga todo el trabajo.
-// El resultado solo cambia cuando cambia el registro o la intensidad, y se
-// pedia dos veces por reparto (una para los pesos y otra para el resumen).
+// ---------------------------------------------------------------------------
+// Planificador de repaso
+// ---------------------------------------------------------------------------
+// Lo que habia antes ponderaba cada categoria por la perdida media reciente.
+// Eso es ponderar fugas, no espaciar: lo que fallas sale MAS seguido, que es
+// masificacion, y lo que dominas cae al suelo del multiplicador y no vuelve
+// nunca a consolidarse. Se olvida en silencio y nada lo detecta.
+//
+// Aqui cada item lleva una vida media propia. Aciertas y el intervalo se
+// alarga; fallas y se acorta. Lo que se sirve es lo que esta a punto de caer
+// por debajo del umbral de recuerdo, no lo que fallaste hace un rato: lo que
+// fallas vuelve ANTES, pero no INMEDIATAMENTE, que es la diferencia entre
+// espaciar y amontonar.
+//
+// El item no es solo la categoria de mano. Nadie falla "top pair": falla top
+// pair OOP enfrentando una apuesta grande. La clave fina lleva posicion y
+// tramo de apuesta, y cuando esa combinacion tiene pocas observaciones se
+// retrocede a la categoria sola, que siempre tiene datos.
+var PLANKEY = "fieltro:plan:v1";
+var H_INICIAL = 6, H_MIN = 0.25, H_MAX = 720;   // horas: 15 min a 30 dias
+var SUBE = 2.2, BAJA = 2.6, MIN_OBS_FINA = 4;
+var planMem = null;
+
+function planLeer(){
+  if (planMem) return planMem;
+  try {
+    var raw = window.localStorage.getItem(PLANKEY);
+    planMem = raw ? JSON.parse(raw) : null;
+  } catch(e){ planMem = null; }
+  if (!planMem || typeof planMem !== "object") planMem = null;
+  if (!planMem){ planMem = {}; planSembrar(); }
+  return planMem;
+}
+function planGuardar(){
+  try { window.localStorage.setItem(PLANKEY, JSON.stringify(planMem)); } catch(e){}
+}
+
+// Contexto del nodo dentro de la clave: quien decide y a que se enfrenta.
+// Un "-" significa que nadie ha apostado todavia.
+function planSufijo(node, sv){
+  var p = node.player, pos = p === 0 ? "OOP" : "IP";
+  if (!node.actions.length || node.actions[0].kind !== "fold") return "|"+pos+"|-";
+  var S = sv || solver;
+  var falta = node.inv[1-p] - node.inv[p];
+  var bote = S.pot + node.inv[0] + node.inv[1];
+  var r = bote > 1e-9 ? falta/bote : 0;
+  return "|"+pos+"|"+(r < 0.45 ? "P" : (r < 0.9 ? "M" : "G"));
+}
+
+function planTocar(clave, acierto, cuando){
+  var m = planLeer();
+  var e = m[clave];
+  if (!e) e = m[clave] = { h: H_INICIAL, t: 0, n: 0, ok: 0 };
+  e.h = acierto ? Math.min(H_MAX, e.h * SUBE) : Math.max(H_MIN, e.h / BAJA);
+  e.t = cuando;
+  e.n++;
+  if (acierto) e.ok++;
+}
+
+// Una decision toca su clave fina y la gruesa. La gruesa sirve de prior cuando
+// la fina todavia no ha visto lo suficiente como para que su intervalo
+// signifique algo.
+function planRegistrar(cat, sufijo, acierto, cuando){
+  if (!cat) return;
+  planTocar(cat, acierto, cuando);
+  if (sufijo) planTocar(cat + sufijo, acierto, cuando);
+  planGuardar();
+}
+
+// Probabilidad de recuerdo con decaimiento exponencial sobre la vida media,
+// que es el modelo de Duolingo y de media docena de sistemas parecidos.
+// Un item que nunca se ha visto vale 0: hay que verlo.
+function planRecuerdo(e, ahora){
+  if (!e || !e.t) return 0;
+  var horas = (ahora - e.t) / 3600000;
+  if (horas <= 0) return 1;
+  return Math.pow(2, -horas / Math.max(H_MIN, e.h));
+}
+
+// Estado efectivo de un item: el fino si ya tiene fondo, y si no el grueso.
+function planEstado(cat, sufijo){
+  var m = planLeer();
+  var fino = sufijo ? m[cat + sufijo] : null;
+  if (fino && fino.n >= MIN_OBS_FINA) return fino;
+  return m[cat] || fino || null;
+}
+
+// Reconstruye el planificador desde el registro la primera vez, para no
+// empezar de cero con un historial ya hecho. Las entradas viejas no guardan
+// posicion ni tamaño, asi que esas solo alimentan la clave gruesa.
+function planSembrar(){
+  var reg;
+  try { reg = logLeer(); } catch(e){ return; }
+  if (!reg || !reg.length) return;
+  for (var i=0;i<reg.length;i++){
+    var r = reg[i], cat = r.cat0 || r.cat;
+    if (!cat) continue;
+    if (r.jue !== undefined && r.pot && r.jue/r.pot < UMBRAL_JUEGO) continue;
+    var ok = puntoDe(r.loss/r.pot) > 0;
+    var suf = (r.pos && r.tam) ? "|"+r.pos+"|"+r.tam : null;
+    planTocar(cat, ok, r.t || Date.now());
+    if (suf) planTocar(cat + suf, ok, r.t || Date.now());
+  }
+  planGuardar();
+}
+
+// Lo servido hace poco baja de peso aunque toque repasarlo: repetir la misma
+// categoria tres veces seguidas es justo lo que este cambio venia a evitar.
+var planCola = [];
+var COLA_MAX = 6;
+function planPenalizacion(clave){
+  var i = planCola.indexOf(clave);
+  if (i < 0) return 1;
+  var d = planCola.length - 1 - i;         // 0 = la ultima servida
+  return 0.3 + 0.7 * Math.min(1, d / 5);
+}
+function planServido(clave){
+  planCola.push(clave);
+  if (planCola.length > COLA_MAX) planCola.shift();
+}
+
+// Multiplicador de reparto por categoria, para un contexto de nodo concreto.
 var multCache = null, multClave = null;
 
-function repMultiplicadores(){
-  var clave = repNivel + ":" + logVersion;
+function repMultiplicadores(sufijo){
+  // la urgencia depende del reloj, asi que el cache caduca cada minuto
+  var clave = repNivel+":"+logVersion+":"+(sufijo||"")+":"+Math.floor(Date.now()/60000);
   if (multClave === clave) return multCache;
   multClave = clave;
-  multCache = repCalcularMultiplicadores();
+  multCache = repCalcularMultiplicadores(sufijo);
   return multCache;
 }
 
-function repCalcularMultiplicadores(){
+function repCalcularMultiplicadores(sufijo){
   if (repNivel === 0) return null;
-  var reg = logLeer();
-  if (reg.length < 12) return null;
-  var v = reg.slice(-VENTANA);
+  var m = planLeer();
+  var claves = Object.keys(m);
+  if (!claves.length) return null;
 
-  var g = {}, total = 0;
-  v.forEach(function(r, i){
-    var k = r.cat0 || r.cat;
-    var p = Math.min(TOPE_PERDIDA, 100*r.loss/r.pot);
-    var e = g[k] || (g[k] = {s:0, n:0, ult:-1});
-    e.s += p; e.n++; e.ult = i;
-    total += p;
-  });
-
+  var ahora = Date.now();
   var lambda = repNivel === 1 ? 0.9 : 1.8;
-  var mult = {}, mediaGlobal = total/v.length;
-  for (var k in g){
-    var e = g[k];
-    var restoN = v.length - e.n;
-    var base = restoN > 0 ? (total - e.s)/restoN : mediaGlobal;
-    var punt = (e.s + K_ENCOGE*base) / (e.n + K_ENCOGE);
-    var contraste = (punt - base) / (punt + base + 1e-9);
-    var antig = 1 + 0.5*Math.min(1, (v.length-1-e.ult)/150);
-    mult[k] = Math.max(MULT_MIN, Math.min(MULT_MAX, Math.exp(lambda*contraste)*antig));
+  var urg = {}, suma = 0, n = 0;
+  for (var i=0;i<claves.length;i++){
+    var k = claves[i];
+    if (k.indexOf("|") >= 0) continue;                  // solo las categorias
+    var e = planEstado(k, sufijo);
+    var u = 1 - planRecuerdo(e, ahora);
+    urg[k] = u; suma += u; n++;
   }
-  mult.__media = mediaGlobal;
-  mult.__nuevo = 1.4;
+  if (!n) return null;
+  var media = suma / n;
+
+  var mult = {};
+  for (var k2 in urg)
+    mult[k2] = Math.max(MULT_MIN, Math.min(MULT_MAX,
+      Math.exp(lambda * (urg[k2] - media)) * planPenalizacion(k2)));
+  mult.__urg = urg;
+  mult.__media = media;
+  mult.__nuevo = MULT_MAX;      // lo que nunca se ha visto es lo mas urgente
   return mult;
 }
 
-function repAplicar(pesos, board, player, sv){
-  var mult = repMultiplicadores();
-  if (!mult) return { pesos: pesos, mult: null, cats: null };
+// node es opcional: al repartir una mano completa todavia no se sabe en que
+// nodo decidira el heroe, asi que ahi se usa el nivel grueso.
+function repAplicar(pesos, board, player, sv, node){
+  var sufijo = node ? planSufijo(node, sv) : null;
+  var mult = repMultiplicadores(sufijo);
   var cats = catsDe(board, player, sv);
+  if (!mult) return { pesos: pesos, mult: null, cats: cats, sufijo: sufijo };
   var out = Float64Array.from(pesos);
   for (var h=0;h<out.length;h++){
     var m = mult[cats[h]];
     out[h] *= (m === undefined ? mult.__nuevo : m);
   }
-  return { pesos: out, mult: mult, cats: cats };
+  return { pesos: out, mult: mult, cats: cats, sufijo: sufijo };
 }
 
-function repResumen(){
-  var mult = repMultiplicadores();
-  if (repNivel === 0) return { txt: "Repetición <b>desactivada</b>: las manos se reparten con su frecuencia natural.", off: true };
-  if (!mult) return { txt: "Repetición <b>"+(repNivel===1?"suave":"fuerte")+"</b>, todavía sin datos: hacen falta al menos 12 decisiones registradas.", off: true };
-  var arr = [];
-  for (var k in mult) if (k.slice(0,2) !== "__") arr.push([k, mult[k]]);
-  arr.sort(function(a,b){ return b[1]-a[1]; });
-  var top = arr.slice(0,3).filter(function(x){ return x[1] > 1.08; })
-                .map(function(x){ return x[0]+" ×"+x[1].toFixed(1); });
-  return { txt: "Repetición <b>"+(repNivel===1?"suave":"fuerte")+"</b>. "+
-    (top.length ? "Verás más: <b>"+top.join("</b>, <b>")+"</b>."
-                : "Ninguna categoría destaca todavía; el reparto va casi natural."), off: false };
+function repResumen(sufijo){
+  var nombre = repNivel === 1 ? "suave" : "fuerte";
+  if (repNivel === 0)
+    return { txt: "Repaso <b>desactivado</b>: las manos se reparten con su frecuencia natural.", off: true };
+  var mult = repMultiplicadores(sufijo);
+  if (!mult)
+    return { txt: "Repaso <b>"+nombre+"</b>, todavía sin datos: se calibra con las primeras decisiones.", off: true };
+
+  var ahora = Date.now(), pend = [], frescos = 0, total = 0;
+  for (var k in mult.__urg){
+    total++;
+    var u = mult.__urg[k];
+    if (u < 0.1) frescos++;
+    if (u > 0.35) pend.push([k, u]);
+  }
+  pend.sort(function(a,b){ return b[1]-a[1]; });
+  var top = pend.slice(0,3).map(function(x){ return x[0]; });
+  return { off: false, txt: "Repaso <b>"+nombre+"</b> · <b>"+frescos+"</b> de "+total+
+    " categorías al día. "+
+    (top.length ? "Toca repasar: <b>"+top.join("</b>, <b>")+"</b>."
+                : "Ninguna vence todavía; el reparto va casi natural.") };
 }
 
-function repPintar(id){
-  var r = repResumen();
+// Estado del planificador a la vista: cuanto queda de cada categoria y cuando
+// vuelve. Sin esto el reparto es una caja negra que "hace lo que quiere".
+function repEstadoHTML(){
+  if (repNivel === 0) return "";
+  var m = planLeer(), ahora = Date.now(), filas = [];
+  for (var k in m){
+    if (k.indexOf("|") >= 0) continue;
+    var e = m[k], p = planRecuerdo(e, ahora);
+    // cuanto falta para caer al 70%, que es cuando toca repasar
+    var restan = e.t ? (Math.log2(1/0.7) * e.h) - (ahora - e.t)/3600000 : -1;
+    filas.push({ k:k, p:p, h:e.h, n:e.n, ok:e.ok, restan:restan });
+  }
+  if (!filas.length) return '<p class="turn">Aún no hay categorías registradas. '+
+    'Se van creando según juegas.</p>';
+  filas.sort(function(a,b){ return a.p - b.p; });
+
+  var cuando = function(f){
+    if (f.restan < 0) return "toca ya";
+    if (f.restan < 1) return "en "+Math.round(f.restan*60)+" min";
+    if (f.restan < 48) return "en "+Math.round(f.restan)+" h";
+    return "en "+Math.round(f.restan/24)+" d";
+  };
+  return filas.slice(0,10).map(function(f){
+    var cls = f.p < 0.5 ? "vencida" : (f.p < 0.8 ? "vence" : "");
+    return '<div class="rfila"><span class="n">'+f.k+'</span>'+
+      '<span class="b"><u class="'+cls+'" style="width:'+(100*f.p).toFixed(0)+'%"></u></span>'+
+      '<span class="c">'+cuando(f)+'</span>'+
+      '<span class="k">'+f.ok+'/'+f.n+'</span></div>';
+  }).join("") +
+  '<p class="turn" style="margin-top:7px">La barra es cuánto queda de lo aprendido; '+
+  'la cifra de la derecha, aciertos sobre repasos. Cada acierto multiplica el intervalo '+
+  'por '+SUBE+' y cada fallo lo divide entre '+BAJA+', así que lo que dominas se espacia '+
+  'y lo que fallas vuelve antes — pero no de inmediato.</p>';
+}
+
+function repPintar(id, sufijo){
+  var r = repResumen(sufijo);
   var el = $(id);
   el.innerHTML = r.txt;
   if (r.off) el.classList.add("off"); else el.classList.remove("off");
@@ -4638,6 +4825,7 @@ Array.prototype.forEach.call($("repSel").children, function(btn){
     Array.prototype.forEach.call($("repSel").children, function(o){ o.classList.remove("on"); });
     btn.classList.add("on");
     $("repNote").innerHTML = repResumen().txt;
+    $("repEstado").innerHTML = repEstadoHTML();
   };
 });
 
@@ -5119,8 +5307,10 @@ function nuevaMano(){
   var vivas = new Float64Array(act().N[hero]);
   act().validReach(hero, act().reach[vil], vivas);
   for (var i=0;i<pesos.length;i++) pesos[i] *= vivas[i];
-  pesos = repAplicar(pesos, act().board, hero, act()).pesos;
+  var repM = repAplicar(pesos, act().board, hero, act());
+  pesos = repM.pesos;
   var hh = sampleIx(pesos);
+  if (hh >= 0 && repM.cats) planServido(repM.cats[hh]);
   // el villano se reparte del alcance que NO choca con las cartas del heroe:
   // esa es la distribucion conjunta correcta, proporcional a r0[h]*r1[h']
   var c1 = act().hc[hero][2*hh], c2 = act().hc[hero][2*hh+1];
