@@ -869,6 +869,21 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
   </div>
 </div>
 
+<div class="panel" id="copia">
+  <h2>Copia de seguridad</h2>
+  <p class="turn" id="copiaResumen"></p>
+  <div class="pick2">
+    <button class="ghost" id="copiaExp">Exportar</button>
+    <button class="ghost" id="copiaImp">Importar</button>
+  </div>
+  <div id="copiaCaja" style="display:none">
+    <textarea id="copiaTxt" spellcheck="false" autocapitalize="off"
+      style="min-height:96px;margin-top:11px"></textarea>
+    <p class="turn" id="copiaNota"></p>
+    <div class="pick2" id="copiaAcciones"></div>
+  </div>
+</div>
+
 <p class="note">
   <b>Cómo leerlo.</b> Cada casilla es una clase de mano: suited arriba de la diagonal,
   offsuit abajo. Las bandas de color son la mezcla de frecuencias, con el código de
@@ -4836,6 +4851,7 @@ function renderProg(){
   $("repNote").innerHTML = repResumen().txt;
   $("repEstado").innerHTML = repEstadoHTML();
   $("predNota").innerHTML = predNotaTxt();
+  copiaPintarResumen();
   $("relojNota").innerHTML = limiteReloj
     ? "Tienes <b>"+limiteReloj+" s</b> por decisión. Pasado el tiempo el contador sigue en rojo: nadie decide por ti, solo queda marcada como tardía."
     : "Sin límite. El tiempo se sigue midiendo para poder comparar tus decisiones rápidas con las pausadas.";
@@ -4853,6 +4869,230 @@ function renderProg(){
     "rangos, el número se mueve por dificultad y no por habilidad.";
 }
 
+/* ================= copia de seguridad ================= */
+// Todo lo que aprende esta pagina vive en el localStorage de un archivo suelto:
+// cambias de dispositivo, o abres el HTML desde otra carpeta, y se pierde el
+// historial, el planificador y la tabla de equity sin ningun aviso.
+//
+// Se guardan los valores tal como estan, sin re-serializar, para que importar
+// no pueda estropear lo que exportar leyo bien.
+// Perezosa a proposito: REPKEY y PLANKEY se declaran mas abajo en este mismo
+// script, asi que una lista evaluada aqui arriba los recogeria como undefined
+// y esas dos claves se quedarian fuera de la copia sin que nada avisara.
+function clavesCopia(){
+  return [SPOTKEY, ULTKEY, LOGKEY, CARASKEY, PLANKEY,
+          REPKEY, RELOJKEY, PREDKEY, EQKEY].filter(Boolean);
+}
+
+function copiaDatosActuales(){
+  var datos = {};
+  clavesCopia().forEach(function(k){
+    try { var v = window.localStorage.getItem(k); if (v !== null) datos[k] = v; } catch(e){}
+  });
+  return datos;
+}
+
+function copiaExportar(){
+  return JSON.stringify({ app: "fieltro", version: 1,
+                          exportado: new Date().toISOString(),
+                          datos: copiaDatosActuales() });
+}
+
+function copiaCuenta(datos, k){
+  try {
+    var a = JSON.parse(datos[k] || "null");
+    if (Array.isArray(a)) return a.length;
+    if (a && typeof a === "object") return Object.keys(a).length;
+  } catch(e){}
+  return 0;
+}
+
+function copiaResumen(datos){
+  return copiaCuenta(datos, LOGKEY)+" decisiones · "+
+         copiaCuenta(datos, SPOTKEY)+" spots · "+
+         copiaCuenta(datos, PLANKEY)+" categorías del planificador · "+
+         copiaCuenta(datos, CARASKEY)+" manos caras"+
+         (datos[EQKEY] ? " · tabla de equity incluida" : "");
+}
+
+// Fusion: util de verdad si entrenas en el movil y en el ordenador. El registro
+// y las manos caras se deduplican por marca de tiempo; del planificador se
+// queda la entrada mas reciente de cada categoria, que es la que manda porque
+// lleva dentro todo el historial de esa clave.
+function copiaFusionarLista(a, b, tope, ordenar){
+  var vistos = {}, out = [];
+  a.concat(b).forEach(function(r){
+    var k = String(r && r.t);
+    if (k === "undefined" || vistos[k]) return;
+    vistos[k] = 1; out.push(r);
+  });
+  if (ordenar) out.sort(ordenar);
+  if (tope && out.length > tope) out.length = tope;
+  return out;
+}
+
+function copiaAplicar(txt, modo){
+  var o;
+  try { o = JSON.parse(txt); }
+  catch(e){ throw new Error("el texto no es un JSON válido."); }
+  if (!o || o.app !== "fieltro" || !o.datos)
+    throw new Error("esto no parece una copia de Fieltro.");
+  var d = o.datos;
+
+  var leer = function(k, porDefecto){
+    try { var v = window.localStorage.getItem(k); return v ? JSON.parse(v) : porDefecto; }
+    catch(e){ return porDefecto; }
+  };
+  var poner = function(k, v){
+    try { window.localStorage.setItem(k, typeof v === "string" ? v : JSON.stringify(v)); } catch(e){}
+  };
+
+  if (modo === "reemplazar"){
+    clavesCopia().forEach(function(k){
+      try {
+        if (d[k] !== undefined) window.localStorage.setItem(k, d[k]);
+        else window.localStorage.removeItem(k);
+      } catch(e){}
+    });
+    return;
+  }
+
+  var dLog = [], dCaras = [], dSpots = [], dPlan = {};
+  try { dLog = JSON.parse(d[LOGKEY] || "[]"); } catch(e){}
+  try { dCaras = JSON.parse(d[CARASKEY] || "[]"); } catch(e){}
+  try { dSpots = JSON.parse(d[SPOTKEY] || "[]"); } catch(e){}
+  try { dPlan = JSON.parse(d[PLANKEY] || "{}"); } catch(e){}
+
+  var log = copiaFusionarLista(leer(LOGKEY, []), dLog, 3000,
+    function(x,y){ return (x.t||0)-(y.t||0); });
+  poner(LOGKEY, log);
+
+  var caras = copiaFusionarLista(leer(CARASKEY, []), dCaras, MAX_CARAS,
+    function(x,y){ return y.loss/y.pot - x.loss/x.pot; });
+  poner(CARASKEY, caras);
+
+  var spots = leer(SPOTKEY, []), nombres = {};
+  spots.forEach(function(x){ nombres[x.nombre] = 1; });
+  dSpots.forEach(function(x){ if (x && !nombres[x.nombre]){ nombres[x.nombre]=1; spots.push(x); } });
+  if (spots.length > 24) spots.length = 24;
+  poner(SPOTKEY, spots);
+
+  var plan = leer(PLANKEY, {});
+  for (var k in dPlan){
+    var mio = plan[k], suyo = dPlan[k];
+    if (!mio || (suyo && (suyo.t||0) > (mio.t||0))) plan[k] = suyo;
+  }
+  poner(PLANKEY, plan);
+
+  // la tabla de equity solo si no se tenia: es identica para todo el mundo
+  if (d[EQKEY] && !leer(EQKEY, null)) poner(EQKEY, d[EQKEY]);
+}
+
+function copiaPintarResumen(){
+  try { planLeer(); } catch(e){}      // siembra el plan antes de contarlo
+  var datos = copiaDatosActuales(), bytes = 0;
+  for (var k in datos) bytes += datos[k].length;
+  $("copiaResumen").innerHTML = "Guardado en este navegador: <b>"+copiaResumen(datos)+
+    "</b>. Ocupa "+(bytes/1024).toFixed(0)+" KB y se pierde si cambias de dispositivo "+
+    "o abres el archivo desde otra carpeta.";
+}
+
+function copiaBotones(lista){
+  var caja = $("copiaAcciones");
+  caja.innerHTML = "";
+  lista.forEach(function(o){
+    var b = document.createElement("button");
+    b.className = "ghost"; b.textContent = o[0]; b.onclick = o[1];
+    caja.appendChild(b);
+  });
+}
+
+$("copiaExp").onclick = function(){
+  $("copiaCaja").style.display = "block";
+  $("copiaTxt").value = copiaExportar();
+  $("copiaTxt").select();
+  $("copiaNota").innerHTML = "Copia este texto y guárdalo donde quieras. "+
+    "El botón de descargar no funciona en algunos visores; copiar sí funciona siempre.";
+  copiaBotones([
+    ["Copiar", function(){
+      var ta = $("copiaTxt");
+      ta.select(); ta.setSelectionRange(0, ta.value.length);
+      var ok = false;
+      try { ok = document.execCommand("copy"); } catch(e){}
+      if (!ok && navigator.clipboard){
+        navigator.clipboard.writeText(ta.value).then(function(){
+          $("copiaNota").innerHTML = "Copiado al portapapeles.";
+        }, function(){
+          $("copiaNota").innerHTML = "No se pudo copiar solo: selecciona el texto y cópialo a mano.";
+        });
+        return;
+      }
+      $("copiaNota").innerHTML = ok ? "Copiado al portapapeles."
+        : "No se pudo copiar solo: selecciona el texto y cópialo a mano.";
+    }],
+    ["Descargar", function(){
+      try {
+        var blob = new Blob([$("copiaTxt").value], {type:"application/json"});
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "fieltro-" + new Date().toISOString().slice(0,10) + ".json";
+        document.body.appendChild(a); a.click();
+        setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+        $("copiaNota").innerHTML = "Si no ha aparecido ninguna descarga, tu visor las bloquea: usa Copiar.";
+      } catch(e){ $("copiaNota").innerHTML = "Este visor no permite descargas. Usa Copiar."; }
+    }],
+    ["Cerrar", function(){ $("copiaCaja").style.display = "none"; }]
+  ]);
+  $("copiaCaja").scrollIntoView({behavior:"smooth", block:"nearest"});
+};
+
+$("copiaImp").onclick = function(){
+  $("copiaCaja").style.display = "block";
+  $("copiaTxt").value = "";
+  $("copiaNota").innerHTML = "Pega aquí una copia de Fieltro, o elige el archivo. "+
+    "<b>Fusionar</b> junta las dos historias sin perder nada; <b>Reemplazar</b> "+
+    "borra lo que haya en este navegador.";
+  var file = document.createElement("input");
+  file.type = "file"; file.accept = "application/json,.json";
+  file.style.display = "none";
+  document.body.appendChild(file);
+
+  var vistaPrevia = function(){
+    try {
+      var o = JSON.parse($("copiaTxt").value);
+      if (!o || o.app !== "fieltro" || !o.datos) throw new Error("x");
+      $("copiaNota").innerHTML = "La copia trae <b>"+copiaResumen(o.datos)+"</b>"+
+        (o.exportado ? ", del "+o.exportado.slice(0,10) : "")+". Elige cómo aplicarla.";
+    } catch(e){
+      $("copiaNota").innerHTML = "Todavía no reconozco una copia válida en el recuadro.";
+    }
+  };
+  file.onchange = function(){
+    var f = file.files && file.files[0];
+    if (!f) return;
+    var fr = new FileReader();
+    fr.onload = function(){ $("copiaTxt").value = String(fr.result); vistaPrevia(); };
+    fr.readAsText(f);
+  };
+  $("copiaTxt").oninput = vistaPrevia;
+
+  var aplicar = function(modo){
+    return function(){
+      try { copiaAplicar($("copiaTxt").value, modo); }
+      catch(e){ $("copiaNota").innerHTML = "No se pudo importar: "+e.message; return; }
+      $("copiaNota").innerHTML = "Importado. Recargando…";
+      setTimeout(function(){ window.location.reload(); }, 400);
+    };
+  };
+  copiaBotones([
+    ["Elegir archivo", function(){ file.click(); }],
+    ["Fusionar", aplicar("fusionar")],
+    ["Reemplazar", aplicar("reemplazar")],
+    ["Cerrar", function(){ $("copiaCaja").style.display = "none"; }]
+  ]);
+  $("copiaCaja").scrollIntoView({behavior:"smooth", block:"nearest"});
+};
+
 $("progWipe").onclick = function(){
   logMem = []; logVersion++;
   planMem = {}; planCola = []; multClave = null;
@@ -4861,6 +5101,7 @@ $("progWipe").onclick = function(){
     window.localStorage.removeItem(CARASKEY);
     window.localStorage.removeItem(PLANKEY);
   } catch(e){}
+  copiaPintarResumen();
   $("prog").style.display = "none";
 };
 $("progHide").onclick = function(){ $("prog").style.display = "none"; };
@@ -6237,6 +6478,7 @@ aplicarEstado(leerJSON(ULTKEY, null));
 pintarSpots();
 drawBoard();
 renderProg();
+copiaPintarResumen();
 
 // Ultima linea a proposito: si algo revento antes, el aviso se queda puesto y
 // dice lo que pasa en vez de dejar la pagina muda.
