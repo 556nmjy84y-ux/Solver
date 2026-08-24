@@ -788,6 +788,17 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
 
   <div class="panel" id="drill" style="display:none">
     <h2>Entrenador</h2>
+    <div class="reprow">
+      <span class="lbl">Spots</span>
+      <div class="wsel" id="drillModo">
+        <button data-m="nodo" class="on">Este nodo</button>
+        <button data-m="bloque">Por tipo</button>
+        <button data-m="mezcla">Mezclado</button>
+      </div>
+    </div>
+    <div class="spotrow" id="drillTipoRow" style="display:none">
+      <select id="drillTipo"></select>
+    </div>
     <p class="turn" id="drillSpot"></p>
     <p class="repline" id="drillRep"></p>
     <div class="reloj" id="drillReloj" style="display:none"><div class="via"><u></u></div><span class="seg"></span></div>
@@ -3434,21 +3445,142 @@ function detail(node, colors, key, el){
 }
 
 /* ---------- entrenador ---------- */
+
+// Todos los nodos de decision alcanzables, con su camino, su tipo de spot y la
+// masa de rango que llega hasta ellos. Hace falta para poder entrenar por tipo
+// en vez de por el nodo que casualmente estabas mirando.
+// La masa se calcula propagando alcances, sin recorrer el arbol por debajo:
+// es la misma cifra que da actionEVs pero sin pagar su coste.
+var MAX_NODOS_ENTRENO = 40;
+
+function nodosEntrenables(sv){
+  var out = [], tmp = [new Float64Array(sv.N[0]), new Float64Array(sv.N[1])];
+  (function rec(n, camino, a0, a1){
+    if (!n || n.term || camino.length > 8) return;
+    if (n.chance){
+      for (var k=0;k<n.cards.length;k++){
+        var c = n.cards[k];
+        var b0 = Float64Array.from(a0), b1 = Float64Array.from(a1);
+        for (var x=0;x<sv.N[0];x++) b0[x] *= sv.blk[0][c*sv.N[0]+x];
+        for (var y=0;y<sv.N[1];y++) b1[y] *= sv.blk[1][c*sv.N[1]+y];
+        rec(n.children[k], camino.concat([k]), b0, b1);
+      }
+      return;
+    }
+    var p = n.player, N = sv.N[p], vivas = tmp[p];
+    sv.validReach(p, p === 0 ? a1 : a0, vivas);
+    var rp = p === 0 ? a0 : a1, masa = 0;
+    for (var h=0;h<N;h++) masa += rp[h]*vivas[h];
+    if (masa > 1e-9)
+      out.push({ camino: camino.slice(), node: n, sufijo: planSufijo(n, sv), masa: masa });
+    for (var i=0;i<n.actions.length;i++){
+      var c0 = Float64Array.from(a0), c1 = Float64Array.from(a1);
+      var rr = p === 0 ? c0 : c1;
+      for (var h2=0;h2<N;h2++) rr[h2] *= n.avg[i*N+h2];
+      rec(n.children[i], camino.concat([i]), c0, c1);
+    }
+  })(sv.root, [], Float64Array.from(sv.reach[0]), Float64Array.from(sv.reach[1]));
+  out.sort(function(a,b){ return b.masa - a.masa; });
+  return out.slice(0, MAX_NODOS_ENTRENO);
+}
+
+// "|OOP|G" -> "OOP ante apuesta grande"
+function nombreSufijo(suf){
+  var t = suf.split("|"), pos = t[1], tam = t[2];
+  if (tam === "-") return pos + " sin apuesta delante";
+  var n = { P: "apuesta pequeña", M: "apuesta media", G: "apuesta grande" }[tam] || "apuesta";
+  return pos + " ante " + n;
+}
+
+// Urgencia media de un tipo, para que el modo mezclado sirva antes lo que peor
+// recuerdas en vez de sortear plano.
+function urgenciaDeTipo(suf){
+  var m = planLeer(), ahora = Date.now(), suma = 0, n = 0;
+  for (var k in m){
+    if (k.slice(-suf.length) !== suf) continue;
+    suma += 1 - planRecuerdo(m[k], ahora); n++;
+  }
+  return n ? suma/n : 1;         // lo que no se ha visto nunca es lo mas urgente
+}
+var drillModo = "nodo";
+
 $("toDrill").onclick = function(){
   var node = nodeAt(), N = solver.N[node.player];
   var t = 0;
   for (var h=0;h<N;h++) t += curEV.freq[h];
   if (t <= 1e-12) return;
-  drill = { node:node, colors:actionColors(node), freq:curEV.freq, hands:0, loss:0, hand:-1,
-            board: solver.boardAtPath(path) };
-  repPintar("drillRep", planSufijo(node, solver));
+  // El entrenador deja de colgar de las variables globales de la pantalla de
+  // estrategia: lleva su propio camino y su propio actionEVs, porque en los
+  // modos por tipo salta de un nodo a otro entre mano y mano.
+  drill = { hands:0, loss:0, hand:-1, cache:{},
+            nodos: nodosEntrenables(solver), tipo: null };
+  fijarNodoDrill(path.slice(), node);
+  llenarTipos();
+  $("drillTipoRow").style.display = drillModo === "bloque" ? "flex" : "none";
   $("stratPanel").style.display = "none";
   $("drill").style.display = "block";
-  $("drillSpot").innerHTML = "Juegas como <b>"+(node.player===0?"OOP":"IP")+
-    "</b>. Elige la acción que jugarías.";
   deal();
   $("drill").scrollIntoView({behavior:"smooth", block:"start"});
 };
+
+// Deja el entrenador apuntando a un nodo concreto, con todo lo que depende de el.
+function fijarNodoDrill(camino, node){
+  var d = drill, clave = camino.join(",");
+  if (!d.cache[clave]) d.cache[clave] = solver.actionEVs(camino);
+  d.path = camino;
+  d.ev = d.cache[clave];
+  d.node = node || d.ev.node;
+  d.colors = actionColors(d.node);
+  d.board = solver.boardAtPath(camino);
+  d.sufijo = planSufijo(d.node, solver);
+}
+
+function llenarTipos(){
+  var sel = $("drillTipo"), vistos = {};
+  sel.innerHTML = "";
+  drill.nodos.forEach(function(x){
+    if (vistos[x.sufijo]) { vistos[x.sufijo].masa += x.masa; return; }
+    vistos[x.sufijo] = { masa: x.masa };
+  });
+  var claves = Object.keys(vistos).sort(function(a,b){ return vistos[b].masa - vistos[a].masa; });
+  claves.forEach(function(k){
+    var o = document.createElement("option");
+    o.value = k; o.textContent = nombreSufijo(k);
+    sel.appendChild(o);
+  });
+  if (claves.length){
+    if (claves.indexOf(drill.sufijo) >= 0) sel.value = drill.sufijo;
+    drill.tipo = sel.value;
+  }
+  sel.onchange = function(){ drill.tipo = sel.value; deal(); };
+}
+
+// Elige el nodo de la proxima mano segun el modo.
+function elegirNodoDrill(){
+  var d = drill;
+  if (drillModo === "nodo" || !d.nodos.length) return;
+  var cand = d.nodos;
+  if (drillModo === "bloque" && d.tipo)
+    cand = d.nodos.filter(function(x){ return x.sufijo === d.tipo; });
+  if (!cand.length) cand = d.nodos;
+  // en mezclado, los tipos que peor recuerdas pesan mas; en bloque solo la masa
+  var pesos = cand.map(function(x){
+    return drillModo === "mezcla" ? x.masa * (0.4 + urgenciaDeTipo(x.sufijo)) : x.masa;
+  });
+  var i = sampleIx(Float64Array.from(pesos));
+  if (i < 0) i = 0;
+  fijarNodoDrill(cand[i].camino, cand[i].node);
+}
+
+Array.prototype.forEach.call($("drillModo").children, function(btn){
+  btn.onclick = function(){
+    drillModo = btn.dataset.m;
+    Array.prototype.forEach.call($("drillModo").children, function(o){ o.classList.remove("on"); });
+    btn.classList.add("on");
+    $("drillTipoRow").style.display = drillModo === "bloque" ? "flex" : "none";
+    if (drill) deal();
+  };
+});
 
 $("drillExit").onclick = function(){
   $("drill").style.display = "none";
@@ -3459,10 +3591,16 @@ $("drillExit").onclick = function(){
 };
 
 function deal(){
-  var d = drill, N = solver.N[d.node.player];
+  var d = drill;
+  elegirNodoDrill();                       // en los modos por tipo, cada mano puede caer en otro nodo
+  var N = solver.N[d.node.player];
+  $("drillSpot").innerHTML = "Juegas como <b>"+(d.node.player===0?"OOP":"IP")+"</b>"+
+    (drillModo === "nodo" ? "" : " · <b>"+nombreSufijo(d.sufijo)+"</b>")+
+    (d.path.length ? " · "+lineaDelCamino(d.path).join(" › ") : " · primera decisión")+
+    ". Elige la acción que jugarías.";
   // los pesos se recalculan en CADA reparto: la repeticion tiene que reaccionar
   // a los errores de esta misma sesion, no a los del momento en que abriste
-  var rep = repAplicar(d.freq, d.board, d.node.player, null, d.node);
+  var rep = repAplicar(d.ev.freq, d.board, d.node.player, null, d.node);
   var pesos = rep.pesos;
   var cum = new Float64Array(N), t = 0;
   for (var i2=0;i2<N;i2++){ t += pesos[i2]; cum[i2] = t; }
@@ -3561,15 +3699,15 @@ function answer(a){
 }
 
 function answerFinal(a, msDecision, prediccion){
-  var d = drill, node = d.node, N = solver.N[node.player], h = d.hand;
-  var lost = curEV.best[h] - curEV.evs[a*N+h];
+  var d = drill, node = d.node, N = solver.N[node.player], h = d.hand, ev = d.ev;
+  var lost = ev.best[h] - ev.evs[a*N+h];
   if (lost < 0) lost = 0;
   d.hands++; d.loss += lost;
-  curEVref = curEV;
+  curEVref = ev;
   var freqReal = 100*node.avg[a*N+h];
   logDecision(node, h, a, lost, null, d.board, null, msDecision,
               prediccion == null ? null : { pr: prediccion, pf: freqReal });
-  guardarManoCara(solver, node, h, a, lost, d.board, null, lineaDelCamino(path));
+  guardarManoCara(solver, node, h, a, lost, d.board, null, lineaDelCamino(d.path));
 
   var pct = 100*lost/solver.pot;
   var cls = pct < 0.5 ? "ok" : (pct < 2 ? "mid" : "bad");
@@ -3586,24 +3724,24 @@ function answerFinal(a, msDecision, prediccion){
   }
 
   node.actions.forEach(function(act,i){
-    var f = 100*node.avg[i*N+h], ev = curEV.evs[i*N+h];
+    var f = 100*node.avg[i*N+h], evi = ev.evs[i*N+h];
     html += '<div class="fbrow'+(i===a ? " chosen":"")+'">'+
       '<i style="background:'+d.colors[i]+'"></i>'+
       '<span class="n">'+actionLabel(act)+'</span>'+
       '<span class="bar2"><u style="width:'+f+'%;background:'+d.colors[i]+'"></u></span>'+
-      '<span>'+f.toFixed(0)+'%</span><span>EV '+ev.toFixed(1)+'</span></div>';
+      '<span>'+f.toFixed(0)+'%</span><span>EV '+evi.toFixed(1)+'</span></div>';
   });
   var mejorA = 0;
   for (var z=1;z<node.actions.length;z++)
-    if (curEV.evs[z*N+h] > curEV.evs[mejorA*N+h]) mejorA = z;
+    if (ev.evs[z*N+h] > ev.evs[mejorA*N+h]) mejorA = z;
   // la frontera se enseña siempre, tambien al acertar: es cuando consolida
-  var parA = parDeAcciones(node, N, curEV.evs, h, a);
+  var parA = parDeAcciones(node, N, ev.evs, h, a);
   if (parA[1] >= 0)
-    html += umbralHTML(solver, path, curEV, {
+    html += umbralHTML(solver, d.path, ev, {
       h: h, aA: parA[0], aB: parA[1],
       colA: d.colors[parA[0]], colB: d.colors[parA[1]],
       nomA: actionLabel(node.actions[parA[0]]), nomB: actionLabel(node.actions[parA[1]]) });
-  html += porqueHTML(solver, path, h, a, mejorA,
+  html += porqueHTML(solver, d.path, h, a, mejorA,
                      node.actions.map(function(x){ return actionLabel(x); }));
   html += '<button class="ghost" id="next">Siguiente mano</button>';
   $("drillFb").innerHTML = html;
