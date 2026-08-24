@@ -4997,6 +4997,43 @@ function copiaPintarResumen(){
     "o abres el archivo desde otra carpeta.";
 }
 
+// Dos vias segun donde corra la pagina. Como archivo suelto, el enlace de
+// siempre. Publicada, el visor no deja que la pagina descargue por su cuenta:
+// la descarga la media el anfitrion y el usuario la confirma. Copiar sigue
+// estando ahi porque funciona en las dos.
+function copiaDescargaClasica(nombre, txt){
+  try {
+    var blob = new Blob([txt], {type:"application/json"});
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = nombre;
+    document.body.appendChild(a); a.click();
+    setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+    $("copiaNota").innerHTML = "Si no ha aparecido ninguna descarga, usa Copiar.";
+  } catch(e){ $("copiaNota").innerHTML = "Aquí no se puede descargar. Usa Copiar."; }
+}
+
+function copiaDescargar(){
+  var nombre = "fieltro-" + new Date().toISOString().slice(0,10) + ".json";
+  var txt = $("copiaTxt").value;
+  if (typeof window.claude === "undefined" || typeof window.claude.use !== "function")
+    return copiaDescargaClasica(nombre, txt);
+  $("copiaNota").innerHTML = "Pidiendo la descarga…";
+  window.claude.use("downloads").then(function(d){
+    if (!d) return copiaDescargaClasica(nombre, txt);
+    return d.save({ filename: nombre, data: txt }).then(function(){
+      $("copiaNota").innerHTML = "Guardado.";
+    }, function(err){
+      var c = err && err.code;
+      $("copiaNota").innerHTML = c === "declined"
+        ? "Descarga cancelada. El texto sigue aquí para copiarlo."
+        : (c === "rate_limited"
+            ? "Hay otra descarga esperando respuesta. Inténtalo en un momento."
+            : "No se pudo descargar. Usa Copiar.");
+    });
+  }).catch(function(){ copiaDescargaClasica(nombre, txt); });
+}
+
 function copiaBotones(lista){
   var caja = $("copiaAcciones");
   caja.innerHTML = "";
@@ -5030,17 +5067,7 @@ $("copiaExp").onclick = function(){
       $("copiaNota").innerHTML = ok ? "Copiado al portapapeles."
         : "No se pudo copiar solo: selecciona el texto y cópialo a mano.";
     }],
-    ["Descargar", function(){
-      try {
-        var blob = new Blob([$("copiaTxt").value], {type:"application/json"});
-        var a = document.createElement("a");
-        a.href = URL.createObjectURL(blob);
-        a.download = "fieltro-" + new Date().toISOString().slice(0,10) + ".json";
-        document.body.appendChild(a); a.click();
-        setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 2000);
-        $("copiaNota").innerHTML = "Si no ha aparecido ninguna descarga, tu visor las bloquea: usa Copiar.";
-      } catch(e){ $("copiaNota").innerHTML = "Este visor no permite descargas. Usa Copiar."; }
-    }],
+    ["Descargar", copiaDescargar],
     ["Cerrar", function(){ $("copiaCaja").style.display = "none"; }]
   ]);
   $("copiaCaja").scrollIntoView({behavior:"smooth", block:"nearest"});
