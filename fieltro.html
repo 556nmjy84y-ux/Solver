@@ -738,8 +738,10 @@ input[type=range]::-moz-range-thumb{width:20px; height:20px; border:none; border
         <button data-v="2">Paga de más</button>
         <button data-v="3">Farolea de más</button>
         <button data-v="4">Nunca farolea</button>
+        <button data-v="5">Te conoce</button>
       </div>
     </div>
+    <p class="turn" id="vilNota"></p>
     <div class="reprow" id="playTexRow">
       <span class="lbl">Textura</span>
       <div class="wsel" id="playTex">
@@ -2446,9 +2448,22 @@ function texturaOk(cs, filtro){
 // Inclina la estrategia del villano y la fija con nodelocking. No busca una
 // frecuencia objetivo exacta: multiplica y renormaliza, así que conserva el
 // orden entre manos. Es un sesgo, no una cifra clavada.
-function aplicarPerfil(s, vil, tipo){
+// tipo 5 es el villano que se adapta al heroe: en vez de una constante recibe
+// un ajuste medido, y a diferencia de los perfiles fijos puede mover el umbral
+// de fold Y la frecuencia de farol a la vez, porque una fuga del heroe en una
+// direccion no impide que tenga otra en la otra.
+//   ajuste.dFold  > 0  el villano se retira mas ante las apuestas del heroe
+//   ajuste.dFarol > 0  el villano farolea mas contra el heroe
+function aplicarPerfil(s, vil, tipo, ajuste){
   if (!tipo) return;
   var DESPLAZ = 0.18;          // cuánto se mueve el umbral, en masa de rango
+  var dFold = 0, dFarol = 0;
+  if (tipo === 5){
+    if (!ajuste) return;
+    dFold = ajuste.dFold || 0;
+    dFarol = ajuste.dFarol || 0;
+    if (!dFold && !dFarol) return;
+  }
   var vistos = new Set();
   (function rec(n, tablero){
     if (!n || n.term || vistos.has(n)) return;
@@ -2510,7 +2525,45 @@ function aplicarPerfil(s, vil, tipo){
             : (suma > 1e-9 ? n.avg[a7*N+h]/suma : (a7 === iPasivo ? 1 : 0));
       };
 
-      if (iFold >= 0 && (tipo === 1 || tipo === 2)){
+      if (tipo === 5){
+        // 1) umbral de fold, igual que los perfiles fijos pero con la
+        //    intensidad que salga de las tendencias medidas
+        var forzadoFold = new Uint8Array(N);
+        if (iFold >= 0 && dFold !== 0){
+          var eqF = 0;
+          for (var hA=0;hA<N;hA++) eqF += w[hA]*n.avg[iFold*N+hA];
+          eqF = masa > 1e-9 ? eqF/masa : 0;
+          var objF = Math.max(0, Math.min(0.95, eqF + dFold));
+          var acF = 0;
+          for (var qA=0;qA<N;qA++){
+            var hB = orden[qA];
+            if (acF/masa < objF){ forzar(hB, iFold); forzadoFold[hB] = 1; acF += w[hB]; }
+            else repartirSinFold(hB);
+          }
+        }
+        // 2) frecuencia de farol sobre la mitad debil, interpolando hacia
+        //    "siempre apuesta" o hacia "nunca", segun el signo
+        if (iBet >= 0 && dFarol !== 0){
+          var mit = 0, mitadMasa = masa/2;
+          for (var qB=0;qB<N;qB++){
+            var hC = orden[qB];
+            var esDebil = mit < mitadMasa;
+            mit += w[hC];
+            if (!esDebil || forzadoFold[hC]) continue;
+            var base = lock[iBet*N+hC];
+            var nuevo = dFarol > 0 ? base + dFarol*(1-base) : base*(1+dFarol);
+            nuevo = Math.max(0, Math.min(1, nuevo));
+            var resto = 0;
+            for (var aC=0;aC<A;aC++) if (aC !== iBet) resto += lock[aC*N+hC];
+            for (var aD=0;aD<A;aD++){
+              if (aD === iBet) lock[aD*N+hC] = nuevo;
+              else lock[aD*N+hC] = resto > 1e-9
+                ? lock[aD*N+hC]/resto * (1-nuevo)
+                : (aD === iPasivo ? 1-nuevo : 0);
+            }
+          }
+        }
+      } else if (iFold >= 0 && (tipo === 1 || tipo === 2)){
         // Un villano que se retira de más no inclina probabilidades: mueve el
         // umbral. Se ordena su rango por fuerza y se corta más arriba o más abajo.
         var eq = 0;
@@ -5077,6 +5130,8 @@ $("toPlay").onclick = function(){
     $("playTex").children[0].classList.add("on");
   }
   repPintar("playRep");
+  if (perfilVil === 5) ajusteVil = ajusteExplotador();
+  $("vilNota").innerHTML = vilNotaTxt();
   $("playBoard").innerHTML = ""; $("playHand").innerHTML = "";
   $("playMesa").innerHTML = ""; $("playHist").innerHTML = ""; $("playWho").textContent = "";
   $("playFb").innerHTML = ""; $("playTally").innerHTML = "";
@@ -5103,7 +5158,100 @@ $("playExit").onclick = function(){
 
 
 var NOMBRE_PERFIL = ["", "que se retira de más", "que paga de más",
-                     "que farolea de más", "que nunca farolea"];
+                     "que farolea de más", "que nunca farolea",
+                     "que ha estudiado tus fugas"];
+
+// ---------------------------------------------------------------------------
+// El villano que te conoce
+// ---------------------------------------------------------------------------
+// Medido sobre este mismo motor: jugar SIEMPRE la accion mas frecuente, sin
+// mezclar nunca, cuesta 0.002% del bote. Contra un rival que juega el
+// equilibrio y no te mira, mezclar no sirve de nada, asi que el entrenador no
+// puede enseñar por que importa. Solo un rival que se adapta convierte tus
+// tendencias en dinero, y entonces la mezcla pasa a tener sentido.
+//
+// El registro ya guardaba lo necesario y no se usaba para nada: tu frecuencia
+// de agresion y de fold junto a la que pide el equilibrio EN ESE MISMO PUNTO,
+// que es lo unico que distingue un sesgo real de jugar spots dificiles.
+var VENTANA_TEND = 400, MIN_ENF = 30, MIN_TOTAL = 60, TOPE_AJUSTE = 0.30, AMPLIF = 1.5;
+
+// Margen de error del sesgo: si jugaras el equilibrio, cada decision seria una
+// Bernoulli con la probabilidad que pide el equilibrio en ESE punto, asi que la
+// varianza de la media sale de sumar p(1-p) y no hay que estimar nada. Sin este
+// filtro, 200 decisiones perfectamente equilibradas producen sesgos aparentes
+// de 6 puntos y el villano se pone a explotar ruido — el mismo error que
+// cometia el indicador de progreso antes de llevar su intervalo.
+function tendenciasHeroe(){
+  var reg = logLeer().slice(-VENTANA_TEND).filter(cuenta);
+  if (reg.length < 20) return null;
+  var enf = reg.filter(function(r){ return r.enf; });
+  var mf = 0, mfE = 0, vf = 0;
+  enf.forEach(function(r){
+    var e = r.folE || 0;
+    mf += r.fol || 0; mfE += e; vf += e*(1-e);
+  });
+  var ma = 0, maE = 0, va = 0;
+  reg.forEach(function(r){
+    var e = r.agrE || 0;
+    ma += r.agr || 0; maE += e; va += e*(1-e);
+  });
+  var nE = enf.length, nT = reg.length;
+  return {
+    n: nT, nEnf: nE,
+    fold:  nE ? mf/nE  : 0,
+    foldE: nE ? mfE/nE : 0,
+    margenFold: nE ? 1.96*Math.sqrt(vf)/nE : Infinity,
+    agr:   ma/nT,
+    agrE:  maE/nT,
+    margenAgr: 1.96*Math.sqrt(va)/nT
+  };
+}
+
+// Traduce las fugas en el sesgo contrario, que es el que las cobra.
+function ajusteExplotador(){
+  var t = tendenciasHeroe();
+  if (!t) return null;
+  var lim = function(x){ return Math.max(-TOPE_AJUSTE, Math.min(TOPE_AJUSTE, x*AMPLIF)); };
+  var dFoldH = t.fold - t.foldE;      // + : te retiras de mas de lo que toca
+  var dAgrH  = t.agr  - t.agrE;       // + : agredes de mas
+  // solo cuenta como fuga lo que supera su propio margen: por debajo es el
+  // reparto, no tu juego, y explotarlo seria inventarte un defecto
+  var realFold = Math.abs(dFoldH) > t.margenFold;
+  var realAgr  = Math.abs(dAgrH)  > t.margenAgr;
+  // si te retiras de mas, farolear contra ti sale gratis
+  var dFarol = (t.nEnf >= MIN_ENF && realFold) ? lim(dFoldH) : 0;
+  // si agredes de mas tienes demasiados faroles, asi que te paga mas
+  var dFold  = (t.n >= MIN_TOTAL && realAgr) ? lim(-dAgrH) : 0;
+  if (Math.abs(dFarol) < 0.03 && Math.abs(dFold) < 0.03) return null;
+  return { dFold: dFold, dFarol: dFarol, t: t, dFoldH: dFoldH, dAgrH: dAgrH };
+}
+
+function vilNotaTxt(){
+  if (perfilVil !== 5) return "";
+  var a = ajusteExplotador();
+  var t = tendenciasHeroe();
+  if (!t || t.n < MIN_TOTAL)
+    return "Necesita verte jugar antes: llevas <b>"+(t ? t.n : 0)+"</b> de las "+MIN_TOTAL+
+      " decisiones mínimas con algo en juego. Mientras tanto se comporta como el equilibrio.";
+  if (!a){
+    var m = Math.max(t.margenFold, t.margenAgr);
+    return "No encuentra ninguna fuga que explotar: tus desvíos no superan el margen de error "+
+      "de la muestra (±"+(100*m).toFixed(0)+" puntos con "+t.n+" decisiones). Jugará el "+
+      "equilibrio hasta que haya diferencia de verdad.";
+  }
+  var pt = function(x){ return Math.abs(100*x).toFixed(0); };
+  var partes = [];
+  if (Math.abs(a.dFarol) >= 0.03)
+    partes.push(a.dFarol > 0
+      ? "te retiras <b>"+pt(a.dFoldH)+" puntos</b> de más ante una apuesta, así que va a farolearte más"
+      : "pagas <b>"+pt(a.dFoldH)+" puntos</b> de más, así que va a farolearte menos y a apostar más por valor");
+  if (Math.abs(a.dFold) >= 0.03)
+    partes.push(a.dFold < 0
+      ? "agredes <b>"+pt(a.dAgrH)+" puntos</b> de más, así que va a pagarte más ligero"
+      : "agredes <b>"+pt(a.dAgrH)+" puntos</b> de menos, así que se retirará más ante tus apuestas");
+  return "Ha visto <b>"+t.n+"</b> decisiones tuyas: "+partes.join(" y ")+
+    ". Cada ficha que le ganes de menos frente al equilibrio es lo que te cuesta esa fuga.";
+}
 
 /* ---- tableros aleatorios ---- */
 // Cada tablero es un solve completo. Medido: 72 ms en river con árbol simple,
@@ -5112,7 +5260,7 @@ var NOMBRE_PERFIL = ["", "que se retira de más", "que paga de más",
 //   rodante    -> 10 vivos, y mientras juegas una mano se resuelve el siguiente
 //                 en segundo plano para sustituir al más antiguo
 var poolN = 0, pool = null, rodante = false, poolCancel = false, caraArriba = false;
-var perfilVil = 0, filtroTex = "", heroActual = 0;
+var perfilVil = 0, filtroTex = "", heroActual = 0, ajusteVil = null;
 var fondoActivo = false, rotIdx = 0;
 var POOL_RODANTE = 10;
 
@@ -5129,6 +5277,8 @@ Array.prototype.forEach.call($("playVil").children, function(btn){
     Array.prototype.forEach.call($("playVil").children, function(o){ o.classList.remove("on"); });
     btn.classList.add("on");
     pool = null;
+    ajusteVil = perfilVil === 5 ? ajusteExplotador() : null;
+    $("vilNota").innerHTML = vilNotaTxt();
   };
 });
 Array.prototype.forEach.call($("playTex").children, function(btn){
@@ -5197,7 +5347,7 @@ function fuenteWorker(){
       typeof Blob === "undefined" || !window.URL || !window.URL.createObjectURL) return null;
   var manejador = "\nself.onmessage=function(e){var d=e.data;try{" +
     "var s=new Solver(d.cfg);for(var i=0;i<d.iters;i++)s.trainOne();s.finalize();" +
-    "if(d.perfil){aplicarPerfil(s,d.vil,d.perfil);s.resetTraining();" +
+    "if(d.perfil){aplicarPerfil(s,d.vil,d.perfil,d.ajuste);s.resetTraining();" +
     "for(var j=0;j<d.iters;j++)s.trainOne();s.finalize();}" +
     "var a=exportarAvg(s),b=a.map(function(x){return x.buffer;});" +
     "self.postMessage({id:d.id,cfg:d.cfg,avg:a},b);" +
@@ -5266,6 +5416,7 @@ function construirPoolWorkers(n, hecho, alFallar){
     if (!cs) return fallar();
     lanzados++;
     w.postMessage({ id: id++, iters: iters, perfil: perfilVil, vil: 1-heroActual,
+                    ajuste: ajusteVil,
                     cfg: cfgDelFormulario(cs.map(cardToStr).join("")) });
   };
 
@@ -5355,7 +5506,7 @@ function construirPoolSecuencial(n, hecho){
       if (perfilVil && !s2.__perfilado){
         // el sesgo se calcula sobre la estrategia ya resuelta y luego se fija;
         // el segundo entrenamiento es el que deja al héroe explotarlo
-        aplicarPerfil(s2, 1-heroActual, perfilVil);
+        aplicarPerfil(s2, 1-heroActual, perfilVil, ajusteVil);
         s2.__perfilado = true;
         s2.resetTraining();
         t = 0;
@@ -5393,7 +5544,7 @@ function resolverEnFondo(){
     if (t < iters) return requestAnimationFrame(paso);
     s2.finalize();
     if (perfilVil && !s2.__perfilado){
-      aplicarPerfil(s2, 1-heroActual, perfilVil);
+      aplicarPerfil(s2, 1-heroActual, perfilVil, ajusteVil);
       s2.__perfilado = true;
       s2.resetTraining();
       t = 0;
@@ -5407,6 +5558,7 @@ function resolverEnFondo(){
 
 function empezar(hero){
   heroActual = hero;
+  if (perfilVil === 5) ajusteVil = ajusteExplotador();
   game = { hero: hero, manos: 0, perdido: 0, fichas: 0, s: solver };
   $("playBMrow").style.display = "none";
   $("playVilRow").style.display = "none";
@@ -5414,7 +5566,7 @@ function empezar(hero){
   $("playCaraRow").style.display = "none";
   // en tablero fijo el perfil se aplica sobre el solve que ya existe
   if (perfilVil && !solver.__perfilado && poolN === 0){
-    aplicarPerfil(solver, 1-hero, perfilVil);
+    aplicarPerfil(solver, 1-hero, perfilVil, ajusteVil);
     solver.__perfilado = true;
     solver.resetTraining();
     $("playSpot").innerHTML = "Adaptando la estrategia al villano…";
@@ -5568,7 +5720,9 @@ function pintarMesa(revelar){
 function pedirAccion(n){
   pintarMesa(false);
   $("playSpot").innerHTML = "Te toca. ¿Qué juegas?" +
-    (perfilVil ? " <b>Villano "+NOMBRE_PERFIL[perfilVil]+".</b>" : "") +
+    (perfilVil ? " <b>Villano "+NOMBRE_PERFIL[perfilVil] +
+      (perfilVil === 5 && !ajusteVil ? " — sin fugas que explotar, juega el equilibrio" : "") +
+      ".</b>" : "") +
     (caraArriba ? " <b>Ves sus cartas.</b>" : "");
   var colors = actionColors(n), acts = $("playActs");
   acts.innerHTML = "";
